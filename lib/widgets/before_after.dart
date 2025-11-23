@@ -61,10 +61,10 @@ class _BeforeAfterState extends State<BeforeAfter> {
 
             // Layer 3: Slider Handle
             Positioned(
-              left: constraints.maxWidth * _splitPosition - 15,
+              left: constraints.maxWidth * _splitPosition - 25,
               top: 0,
               bottom: 0,
-              width: 30,
+              width: 50,
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onHorizontalDragUpdate: (details) {
@@ -83,8 +83,8 @@ class _BeforeAfterState extends State<BeforeAfter> {
                     ),
                     // Handle Icon
                     Container(
-                      width: 30,
-                      height: 30,
+                      width: 44,
+                      height: 44,
                       decoration: const BoxDecoration(
                         color: Colors.white,
                         shape: BoxShape.circle,
@@ -96,7 +96,7 @@ class _BeforeAfterState extends State<BeforeAfter> {
                           ),
                         ],
                       ),
-                      child: const Icon(Icons.compare_arrows, size: 20, color: Colors.black),
+                      child: const Icon(Icons.compare_arrows, size: 28, color: Colors.black),
                     ),
                   ],
                 ),

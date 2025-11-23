@@ -43,12 +43,16 @@ dependencies:
   window_manager: ^0.5.1
   camera: ^0.11.3
   record: ^6.1.2
+  image_picker: ^1.0.4
   camera_macos: ^0.0.9
-  # ffmpeg_kit_flutter_min_gpl: ^6.0.3
+  ffmpeg_kit_flutter_new: ^4.1.0
+  gal: ^2.3.2
+  permission_handler: ^12.0.1
+  flutter_svg: ^2.2.3
 
-# dependency_overrides:
-#   ffmpeg_kit_flutter_macos:
-#     path: packages/dummy_ffmpeg_macos
+dependency_overrides:
+  ffmpeg_kit_flutter_new:
+    path: packages/ffmpeg_kit_flutter_new_local
 
 dev_dependencies:
   flutter_test:
@@ -60,6 +64,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -75,6 +80,7 @@ flutter:
   # To add assets to your application, add an assets section, like this:
   assets:
     - assets/bin/ffmpeg
+    - assets/capsule.svg
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
@@ -88,16 +94,19 @@ flutter:
   # list giving the asset and other descriptors for the font. For
   # example:
   # fonts:
-  #   - family: Schyler
-  #     fonts:
-  #       - asset: fonts/Schyler-Regular.ttf
-  #       - asset: fonts/Schyler-Italic.ttf
-  #         style: italic
-  #   - family: Trajan Pro
-  #     fonts:
-  #       - asset: fonts/TrajanPro.ttf
-  #       - asset: fonts/TrajanPro_Bold.ttf
-  #         weight: 700
+  fonts:
+    - family: Krona One
+      fonts:
+        - asset: assets/KronaOne-Regular.ttf
   #   #
   #   # For details regarding fonts from package dependencies,
   #   # see https://flutter.dev/to/font-from-package
+
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: false
+  macos:
+    generate: true
+    image_path: "assets/icon_bg.png"
+  image_path: "assets/icon_bg.png"
+  min_sdk_android: 21 # android min sdk min:16, default 21

@@ -12,17 +12,22 @@ class MediaControls extends StatelessWidget {
   final String? originalSize;
   final String estimatedSize;
   final bool hasAv1Hardware;
+  final double resolution;
+  final Size? originalResolution;
   final ValueChanged<double> onScrubChanged;
   final ValueChanged<double> onScrubEnd;
   final ValueChanged<String?> onFormatChanged;
+  final ValueChanged<double?> onResolutionChanged;
   final ValueChanged<double> onBitrateChanged;
   final ValueChanged<double> onBitrateEnd;
   final VoidCallback onClear;
   final VoidCallback onSave;
   final List<DropdownMenuItem<String>> formatItems;
+  final double? width;
 
   const MediaControls({
     super.key,
+    this.width,
     required this.scrubPosition,
     required this.duration,
     required this.outputFormat,
@@ -34,9 +39,12 @@ class MediaControls extends StatelessWidget {
     this.originalSize,
     required this.estimatedSize,
     required this.hasAv1Hardware,
+    required this.resolution,
+    this.originalResolution,
     required this.onScrubChanged,
     required this.onScrubEnd,
     required this.onFormatChanged,
+    required this.onResolutionChanged,
     required this.onBitrateChanged,
     required this.onBitrateEnd,
     required this.onClear,
@@ -51,7 +59,7 @@ class MediaControls extends StatelessWidget {
       elevation: 8,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Container(
-        width: 350,
+        width: width ?? 350,
         padding: const EdgeInsets.all(16.0),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -77,59 +85,112 @@ class MediaControls extends StatelessWidget {
                 ),
               ],
             ),
-            const Divider(height: 24),
+            const Divider(height: 16),
 
             // Scrubbing Slider
-            Row(
-              children: [
-                const Text('Scrub: '),
-                Expanded(
-                  child: Slider(
-                    value: scrubPosition,
-                    onChanged: onScrubChanged,
-                    onChangeEnd: onScrubEnd,
+            SizedBox(
+              height: 40,
+              child: Row(
+                children: [
+                  const Text('Scrub: '),
+                  Expanded(
+                    child: Slider(
+                      value: scrubPosition,
+                      onChanged: onScrubChanged,
+                      onChangeEnd: onScrubEnd,
+                    ),
                   ),
-                ),
-                Text(_formatDuration(duration * scrubPosition)),
-              ],
+                  Text(_formatDuration(duration * scrubPosition)),
+                ],
+              ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
 
             // Format Selection
-            Row(
-              children: [
-                const Text('Format: '),
-                const Spacer(),
-                DropdownButton<String>(
-                  value: outputFormat,
-                  isDense: true,
-                  underline: Container(),
-                  items: formatItems,
-                  onChanged: onFormatChanged,
-                ),
-              ],
+            SizedBox(
+              height: 40,
+              child: Row(
+                children: [
+                  const Text('Format: '),
+                  const Spacer(),
+                  DropdownButton<String>(
+                    value: outputFormat,
+                    isDense: true,
+                    underline: Container(),
+                    items: formatItems,
+                    onChanged: onFormatChanged,
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
+
+            // Resolution Selection (Video only)
+            if (originalResolution != null) ...[
+              SizedBox(
+                height: 40,
+                child: Row(
+                  children: [
+                    const Text('Resolution: '),
+                    const Spacer(),
+                    DropdownButton<double>(
+                      value: resolution,
+                      isDense: true,
+                      underline: Container(),
+                      selectedItemBuilder: (BuildContext context) {
+                        return [1.0, 0.5, 0.25].map<Widget>((double value) {
+                          return Center(
+                            child: Text(
+                              value == 1.0 ? '100%' : (value == 0.5 ? '50%' : '25%'),
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                          );
+                        }).toList();
+                      },
+                      items: [
+                        DropdownMenuItem(
+                          value: 1.0,
+                          child: _buildResolutionItem('100%', originalResolution!),
+                        ),
+                        DropdownMenuItem(
+                          value: 0.5,
+                          child: _buildResolutionItem('50%', Size(originalResolution!.width * 0.5, originalResolution!.height * 0.5)),
+                        ),
+                        DropdownMenuItem(
+                          value: 0.25,
+                          child: _buildResolutionItem('25%', Size(originalResolution!.width * 0.25, originalResolution!.height * 0.25)),
+                        ),
+                      ],
+                      onChanged: onResolutionChanged,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
 
             // Bitrate Slider
-            Row(
-              children: [
-                const Text('Bitrate: '),
-                Expanded(
-                  child: Slider(
-                    value: bitrate,
-                    min: 10,
-                    max: maxBitrate,
-                    divisions: 100,
-                    label: '${bitrate.round()} kbps',
-                    onChanged: onBitrateChanged,
-                    onChangeEnd: onBitrateEnd,
+            SizedBox(
+              height: 40,
+              child: Row(
+                children: [
+                  const Text('Bitrate: '),
+                  Expanded(
+                    child: Slider(
+                      value: bitrate,
+                      min: 10,
+                      max: maxBitrate,
+                      divisions: 100,
+                      label: '${bitrate.round()} kbps',
+                      onChanged: onBitrateChanged,
+                      onChangeEnd: onBitrateEnd,
+                    ),
                   ),
-                ),
-                Text('${bitrate.round()} k'),
-              ],
+                  Text('${bitrate.round()} k'),
+                ],
+              ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
 
             // Actions
             Row(
@@ -179,5 +240,19 @@ class MediaControls extends StatelessWidget {
     String twoDigitMinutes = twoDigits(duration.inMinutes.remainder(60));
     String twoDigitSeconds = twoDigits(duration.inSeconds.remainder(60));
     return '${twoDigits(duration.inHours)}:$twoDigitMinutes:$twoDigitSeconds';
+  }
+
+  Widget _buildResolutionItem(String percentage, Size size) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(percentage, style: const TextStyle(fontWeight: FontWeight.bold)),
+        Text(
+          '${size.width.round()} x ${size.height.round()}',
+          style: const TextStyle(fontSize: 10, color: Colors.grey),
+        ),
+      ],
+    );
   }
 }

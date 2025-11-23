@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-// import 'package:ffmpeg_kit_flutter_min_gpl/ffmpeg_kit.dart';
-// import 'package:ffmpeg_kit_flutter_min_gpl/return_code.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -46,17 +48,102 @@ class MobileFfmpegService implements FfmpegService {
 
   @override
   Future<FfmpegTask> execute(String command, {void Function(double progress)? onProgress, Duration? totalDuration}) async {
-    // Stub for now
-    throw UnimplementedError('Mobile FFmpeg not implemented yet');
+    // FFmpegKit expects command without "ffmpeg" prefix if using execute()
+    // But we are passing full command string often.
+    // Actually, execute() takes a string of arguments.
+    // Our command string usually starts with flags like "-y -i ...".
+    // If the command string passed here starts with "ffmpeg", we should strip it?
+    // The Desktop implementation uses Process.start(binary, args).
+    // The args are parsed from the command string.
+    // Let's parse args here too to be safe and consistent.
+    
+    // However, FFmpegKit.execute(String command) takes a single string.
+    // If we pass "-y -i input.mp4 output.mp4", it works.
+    
+    final completer = Completer<void>();
+
+    final session = await FFmpegKit.executeAsync(
+      command,
+      (session) async {
+        // Complete callback
+        completer.complete();
+      },
+      (log) {
+        // Log callback
+        debugPrint(log.getMessage());
+      },
+      (statistics) {
+        // Statistics callback
+        if (onProgress != null && totalDuration != null) {
+          final time = statistics.getTime();
+          if (time > 0) {
+            final progress = time / totalDuration.inMilliseconds;
+            onProgress(progress.clamp(0.0, 1.0));
+          }
+        }
+      },
+    );
+
+    final doneFuture = completer.future.then((_) async {
+      final returnCode = await session.getReturnCode();
+      if (ReturnCode.isCancel(returnCode)) {
+        throw Exception('FFmpeg cancelled');
+      }
+      if (!ReturnCode.isSuccess(returnCode)) {
+        final failStackTrace = await session.getFailStackTrace();
+        throw Exception('FFmpeg failed with return code $returnCode. $failStackTrace');
+      }
+    });
+
+    return FfmpegTask(
+      doneFuture,
+      () {
+        FFmpegKit.cancel(session.getSessionId());
+      },
+    );
   }
 
   @override
   Future<MediaInfo> getMediaInfo(String path) async {
-    throw UnimplementedError('Mobile FFmpeg not implemented yet');
+    final session = await FFprobeKit.getMediaInformation(path);
+    final info = session.getMediaInformation();
+    
+    if (info == null) {
+      throw Exception('Failed to get media info');
+    }
+
+    final durationStr = info.getDuration();
+    final bitrateStr = info.getBitrate();
+
+    Duration duration = Duration.zero;
+    if (durationStr != null) {
+      final seconds = double.tryParse(durationStr);
+      if (seconds != null) {
+        duration = Duration(milliseconds: (seconds * 1000).round());
+      }
+    }
+
+    int bitrate = 0;
+    if (bitrateStr != null) {
+      bitrate = int.tryParse(bitrateStr) ?? 0;
+      // FFprobe returns bitrate in bps, we want kbps?
+      // Desktop implementation parses "21640 kb/s".
+      // FFprobeKit usually returns bps.
+      // Let's convert to kbps to match desktop implementation expectation.
+      bitrate = (bitrate / 1000).round();
+    }
+
+    return MediaInfo(duration: duration, bitrate: bitrate);
   }
 
   @override
   Future<bool> hasEncoder(String encoderName) async {
+    // FFmpegKit min-gpl has standard encoders.
+    // We can't easily check at runtime without parsing "ffmpeg -encoders".
+    // But for now, let's assume standard ones are present.
+    // If checking for hardware acceleration (videotoolbox/mediacodec),
+    // min-gpl might not have them enabled or exposed easily via this check.
+    // For Android, 'h264_mediacodec' might be available.
     return false;
   }
 }

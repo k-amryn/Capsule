@@ -112,6 +112,8 @@ class _AudioEditorState extends State<AudioEditor> {
 
   @override
   Widget build(BuildContext context) {
+    final isNarrow = MediaQuery.of(context).size.width < 600;
+
     return Stack(
       children: [
         // Layer 1: Audio Viewer (Split View)
@@ -147,9 +149,11 @@ class _AudioEditorState extends State<AudioEditor> {
 
         // Layer 2: Floating Controls
         Positioned(
+          left: isNarrow ? 20 : null,
           right: 20,
           bottom: 20,
           child: MediaControls(
+            width: isNarrow ? double.infinity : 350,
             scrubPosition: _scrubPosition,
             duration: _audioDuration,
             outputFormat: _outputFormat,
@@ -161,6 +165,8 @@ class _AudioEditorState extends State<AudioEditor> {
             originalSize: _originalSize,
             estimatedSize: _estimateSize(),
             hasAv1Hardware: false, // Not relevant for audio
+            resolution: 1.0, // Dummy
+            originalResolution: null, // Not relevant for audio
             onScrubChanged: _onScrubChanged,
             onScrubEnd: (value) {
               _debounceTimer?.cancel();
@@ -174,6 +180,7 @@ class _AudioEditorState extends State<AudioEditor> {
                 _generatePreview();
               }
             },
+            onResolutionChanged: (value) {}, // No-op for audio
             onBitrateChanged: _onBitrateChanged,
             onBitrateEnd: (value) {
               _debounceTimer?.cancel();

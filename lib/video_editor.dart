@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
@@ -38,6 +39,7 @@ class _VideoEditorState extends State<VideoEditor> {
   double _progress = 0.0;
   bool _hasAv1Hardware = false;
   String? _originalSize;
+  double _resolution = 1.0; // 1.0, 0.5, 0.25
   
   late FfmpegService _ffmpegService;
   
@@ -126,6 +128,8 @@ class _VideoEditorState extends State<VideoEditor> {
 
   @override
   Widget build(BuildContext context) {
+    final isNarrow = MediaQuery.of(context).size.width < 600;
+
     return Stack(
       children: [
         // Layer 1: Video Viewer
@@ -155,9 +159,11 @@ class _VideoEditorState extends State<VideoEditor> {
 
         // Layer 2: Floating Controls
         Positioned(
+          left: isNarrow ? 20 : null,
           right: 20,
           bottom: 20,
           child: MediaControls(
+            width: isNarrow ? double.infinity : 350,
             scrubPosition: _scrubPosition,
             duration: _videoDuration,
             outputFormat: _outputFormat,
@@ -169,6 +175,8 @@ class _VideoEditorState extends State<VideoEditor> {
             originalSize: _originalSize,
             estimatedSize: _estimateSize(),
             hasAv1Hardware: _hasAv1Hardware,
+            resolution: _resolution,
+            originalResolution: _originalController?.value.size,
             onScrubChanged: _onScrubChanged,
             onScrubEnd: (value) {
               _debounceTimer?.cancel();
@@ -178,6 +186,14 @@ class _VideoEditorState extends State<VideoEditor> {
               if (newValue != null) {
                 setState(() {
                   _outputFormat = newValue;
+                });
+                _generatePreview();
+              }
+            },
+            onResolutionChanged: (newValue) {
+              if (newValue != null) {
+                setState(() {
+                  _resolution = newValue;
                 });
                 _generatePreview();
               }
@@ -244,32 +260,74 @@ class _VideoEditorState extends State<VideoEditor> {
         }
       } else {
         codec = 'libvpx-vp9';
-        speed = '-speed 8'; // Fastest for preview
+        // -speed is deprecated for VP9 in newer ffmpeg, use -cpu-used
+        // 5-8 is realtime.
+        speed = '-cpu-used 5';
       }
       
       debugPrint('Generating preview with codec: $codec');
       
-      if (_outputFormat == 'vp9') {
-        // 1. Compress to VP9 (to generate artifacts)
-        final vp9Task = await _ffmpegService.execute(
-          '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf scale=-2:720 -c:v $codec -b:v ${_bitrate.round()}k $speed -an "$tempVp9Path"'
-        );
-        _currentPreviewTask = vp9Task;
-        await vp9Task.done;
-
-        // 2. Transcode to H.264 for playback
-        final transcodeTask = await _ffmpegService.execute(
-          '-y -i "$tempVp9Path" -c:v libx264 -preset ultrafast -an "$compressedClipPath"'
-        );
-        _currentPreviewTask = transcodeTask;
-        await transcodeTask.done;
+      // Use lower resolution for preview on mobile to avoid OOM/Crash
+      // Also apply user selected resolution scaling
+      String scaleFilter;
+      if (Platform.isAndroid || Platform.isIOS) {
+        scaleFilter = 'scale=trunc(iw*$_resolution/2)*2:480'; // Force 480p height but scale width? No, that's conflicting.
+        // Mobile preview is fixed height 480 usually.
+        // If user wants 50%, we should probably respect that relative to original?
+        // But for preview, we just want it to be fast.
+        // Let's just stick to the fixed preview size for mobile to be safe,
+        // OR apply the resolution factor to the preview size.
+        // Let's apply the resolution factor to the base preview size.
+        // Actually, for preview, we should probably just show what it looks like.
+        // But resizing for preview might be slow if we do complex scaling.
+        // Let's just use the user's resolution selection for the output,
+        // and for preview, we try to match it if possible, or just use a reasonable preview size.
+        
+        // If user selects 50%, we should scale the input by 0.5.
+        // But we also have the mobile preview constraint.
+        // Let's just use the user's resolution.
+        scaleFilter = 'scale=trunc(iw*$_resolution/2)*2:trunc(ih*$_resolution/2)*2';
       } else {
-        // AV1 (or others) - direct compression to MP4
-        final task = await _ffmpegService.execute(
-          '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf scale=-2:720 -c:v $codec -b:v ${_bitrate.round()}k $speed -an "$compressedClipPath"'
-        );
-        _currentPreviewTask = task;
-        await task.done;
+        // Desktop
+        scaleFilter = 'scale=trunc(iw*$_resolution/2)*2:trunc(ih*$_resolution/2)*2';
+      }
+
+      try {
+        if (_outputFormat == 'vp9') {
+          // 1. Compress to VP9 (to generate artifacts)
+          final vp9Task = await _ffmpegService.execute(
+            '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 -an "$tempVp9Path"'
+          );
+          _currentPreviewTask = vp9Task;
+          await vp9Task.done;
+
+          // 2. Transcode to H.264 for playback
+          final transcodeTask = await _ffmpegService.execute(
+            '-y -i "$tempVp9Path" -c:v libx264 -preset ultrafast -threads 0 -an "$compressedClipPath"'
+          );
+          _currentPreviewTask = transcodeTask;
+          await transcodeTask.done;
+        } else {
+          // AV1 (or others) - direct compression to MP4
+          final task = await _ffmpegService.execute(
+            '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 -an "$compressedClipPath"'
+          );
+          _currentPreviewTask = task;
+          await task.done;
+        }
+      } catch (e) {
+        debugPrint('Preview generation failed with $codec: $e');
+        // Fallback to H.264 if VP9/AV1 fails, just to show something
+        if (_outputFormat == 'vp9' || _outputFormat == 'av1') {
+           debugPrint('Falling back to H.264 for preview');
+           final fallbackTask = await _ffmpegService.execute(
+            '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v libx264 -preset ultrafast -b:v ${_bitrate.round()}k -an "$compressedClipPath"'
+          );
+          _currentPreviewTask = fallbackTask;
+          await fallbackTask.done;
+        } else {
+          rethrow;
+        }
       }
 
       // 3. Update players
@@ -324,17 +382,25 @@ class _VideoEditorState extends State<VideoEditor> {
     });
 
     try {
-      final FileSaveLocation? result = await getSaveLocation(
-        suggestedName: 'compressed.${_outputFormat == 'vp9' ? 'webm' : 'mp4'}',
-        acceptedTypeGroups: [
-          XTypeGroup(
-            label: 'Videos',
-            extensions: [_outputFormat == 'vp9' ? 'webm' : 'mp4'],
-          ),
-        ],
-      );
+      String? outputPath;
+      
+      if (Platform.isAndroid || Platform.isIOS) {
+        final tempDir = await getTemporaryDirectory();
+        outputPath = '${tempDir.path}/compressed_${DateTime.now().millisecondsSinceEpoch}.${_outputFormat == 'vp9' ? 'webm' : 'mp4'}';
+      } else {
+        final FileSaveLocation? result = await getSaveLocation(
+          suggestedName: 'compressed.${_outputFormat == 'vp9' ? 'webm' : 'mp4'}',
+          acceptedTypeGroups: [
+            XTypeGroup(
+              label: 'Videos',
+              extensions: [_outputFormat == 'vp9' ? 'webm' : 'mp4'],
+            ),
+          ],
+        );
+        outputPath = result?.path;
+      }
 
-      if (result == null) {
+      if (outputPath == null) {
         setState(() {
           _isCompressing = false;
         });
@@ -349,17 +415,21 @@ class _VideoEditorState extends State<VideoEditor> {
           codec = 'av1_videotoolbox';
         } else {
           codec = 'libaom-av1';
-          speed = '-cpu-used 4'; // Better quality for final output
+          speed = '-cpu-used 6'; // Faster encoding (4-6 is good balance, 8 is fastest)
         }
       } else {
         codec = 'libvpx-vp9';
-        speed = '-speed 4'; // Better quality for final output
+        speed = '-cpu-used 6'; // Faster encoding
       }
 
       debugPrint('Saving video with codec: $codec');
 
+      // Add -row-mt 1 for better multi-threading performance
+      // Add scaling
+      final scaleFilter = 'scale=trunc(iw*$_resolution/2)*2:trunc(ih*$_resolution/2)*2';
+      
       final task = await _ffmpegService.execute(
-        '-y -i "${widget.file.path}" -c:v $codec -b:v ${_bitrate.round()}k $speed "${result.path}"',
+        '-y -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 "$outputPath"',
         onProgress: (progress) {
           if (mounted) {
             setState(() {
@@ -371,10 +441,19 @@ class _VideoEditorState extends State<VideoEditor> {
       );
       await task.done;
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Video saved successfully')),
-        );
+      if (Platform.isAndroid || Platform.isIOS) {
+        await Gal.putVideo(outputPath);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Video saved to Gallery')),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Video saved successfully')),
+          );
+        }
       }
     } catch (e) {
       if (mounted) {

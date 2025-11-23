@@ -1,9 +1,12 @@
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:cross_file/cross_file.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:window_manager/window_manager.dart';
 
@@ -13,20 +16,23 @@ import 'views/compress_view.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await windowManager.ensureInitialized();
-
-  WindowOptions windowOptions = const WindowOptions(
-    size: Size(800, 600),
-    center: true,
-    backgroundColor: Colors.transparent,
-    skipTaskbar: false,
-    titleBarStyle: TitleBarStyle.hidden,
-  );
   
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    await windowManager.show();
-    await windowManager.focus();
-  });
+  if (!Platform.isAndroid && !Platform.isIOS) {
+    await windowManager.ensureInitialized();
+
+    WindowOptions windowOptions = const WindowOptions(
+      size: Size(800, 600),
+      center: true,
+      backgroundColor: Colors.transparent,
+      skipTaskbar: false,
+      titleBarStyle: TitleBarStyle.hidden,
+    );
+    
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      await windowManager.show();
+      await windowManager.focus();
+    });
+  }
 
   runApp(const MyApp());
 }
@@ -66,11 +72,18 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _dragging = false;
 
   Future<void> _pickFile() async {
-    const XTypeGroup typeGroup = XTypeGroup(
-      label: 'media',
-      extensions: <String>['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'avi', 'mkv', 'mp3', 'wav', 'm4a', 'ogg'],
-    );
-    final XFile? file = await openFile(acceptedTypeGroups: <XTypeGroup>[typeGroup]);
+    XFile? file;
+    if (Platform.isAndroid || Platform.isIOS) {
+      final ImagePicker picker = ImagePicker();
+      file = await picker.pickMedia();
+    } else {
+      const XTypeGroup typeGroup = XTypeGroup(
+        label: 'media',
+        extensions: <String>['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'avi', 'mkv', 'mp3', 'wav', 'm4a', 'ogg'],
+      );
+      file = await openFile(acceptedTypeGroups: <XTypeGroup>[typeGroup]);
+    }
+
     if (file != null) {
       setState(() {
         _capturedFile = file;
@@ -79,11 +92,106 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  Future<void> _pickFromCamera() async {
+    final ImagePicker picker = ImagePicker();
+    // Show dialog to choose Photo or Video? Or just default to Photo?
+    // The user said "switch for Picture and Video" on desktop.
+    // On mobile, native camera usually lets you switch.
+    // But ImagePicker has separate methods: pickImage and pickVideo.
+    // I'll show a simple dialog or bottom sheet to choose.
+    
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      builder: (context) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.camera_alt, color: Colors.white),
+            title: const Text('Take Photo', style: TextStyle(color: Colors.white)),
+            onTap: () async {
+              Navigator.pop(context);
+              final XFile? photo = await picker.pickImage(source: ImageSource.camera);
+              if (photo != null) {
+                setState(() {
+                  _capturedFile = photo;
+                  _appMode = AppMode.compress;
+                });
+              }
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.videocam, color: Colors.white),
+            title: const Text('Record Video', style: TextStyle(color: Colors.white)),
+            onTap: () async {
+              Navigator.pop(context);
+              final XFile? video = await picker.pickVideo(source: ImageSource.camera);
+              if (video != null) {
+                setState(() {
+                  _capturedFile = video;
+                  _appMode = AppMode.compress;
+                });
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.grey[900],
-      body: DropTarget(
+    Widget content = Stack(
+      children: [
+        // Main Content
+        Positioned.fill(
+          child: _buildContent(),
+        ),
+
+        // Drag Overlay
+        if (_dragging)
+          Positioned(
+            top: 20,
+            left: 20,
+            right: 20,
+            bottom: 20,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.blue.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: CustomPaint(
+                painter: DashedBorderPainter(
+                  color: Colors.blue,
+                  strokeWidth: 4.0,
+                  gap: 10.0,
+                  radius: 12.0,
+                ),
+              ),
+            ),
+          ),
+
+        // Draggable Titlebar Area (Desktop only)
+        if (!Platform.isAndroid && !Platform.isIOS)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 28,
+            child: GestureDetector(
+              onPanStart: (details) {
+                windowManager.startDragging();
+              },
+              child: Container(
+                color: Colors.transparent,
+              ),
+            ),
+          ),
+      ],
+    );
+
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      content = DropTarget(
         onDragDone: (detail) {
           setState(() {
             _dragging = false;
@@ -111,54 +219,13 @@ class _MyHomePageState extends State<MyHomePage> {
             _dragging = false;
           });
         },
-        child: Stack(
-          children: [
-            // Main Content
-            Positioned.fill(
-              child: _buildContent(),
-            ),
+        child: content,
+      );
+    }
 
-            // Drag Overlay
-            if (_dragging)
-              Positioned(
-                top: 20,
-                left: 20,
-                right: 20,
-                bottom: 20,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Colors.blue.withValues(alpha: 0.2),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: CustomPaint(
-                    painter: DashedBorderPainter(
-                      color: Colors.blue,
-                      strokeWidth: 4.0,
-                      gap: 10.0,
-                      radius: 12.0,
-                    ),
-                  ),
-                ),
-              ),
-
-            // Draggable Titlebar Area
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              height: 28,
-              child: GestureDetector(
-                onPanStart: (details) {
-                  windowManager.startDragging();
-                },
-                child: Container(
-                  color: Colors.transparent,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
+    return Scaffold(
+      backgroundColor: Colors.grey[900],
+      body: content,
     );
   }
 
@@ -215,17 +282,27 @@ class _MyHomePageState extends State<MyHomePage> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(
-              Icons.cloud_upload_outlined,
-              size: 100,
-              color: Colors.white54,
+            SvgPicture.asset(
+              'assets/capsule.svg',
+              width: 120,
+              height: 120,
+              colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
+            const Text(
+              'Capsule',
+              style: TextStyle(
+                fontFamily: 'Krona One',
+                fontSize: 32,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 8),
             const Text(
               'Drag and drop media here',
               style: TextStyle(
-                color: Colors.white,
-                fontSize: 24,
+                color: Colors.white54,
+                fontSize: 16,
                 fontWeight: FontWeight.w300,
               ),
             ),
@@ -243,9 +320,13 @@ class _MyHomePageState extends State<MyHomePage> {
                   icon: Icons.camera_alt,
                   label: 'Open Camera',
                   onTap: () {
-                    setState(() {
-                      _appMode = AppMode.camera;
-                    });
+                    if (Platform.isAndroid || Platform.isIOS) {
+                      _pickFromCamera();
+                    } else {
+                      setState(() {
+                        _appMode = AppMode.camera;
+                      });
+                    }
                   },
                 ),
                 const SizedBox(height: 16),
