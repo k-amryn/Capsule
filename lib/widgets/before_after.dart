@@ -30,34 +30,55 @@ class _BeforeAfterState extends State<BeforeAfter> {
       builder: (context, constraints) {
         return Stack(
           children: [
-            // Layer 1: Original (Left side)
+            // Layer 1: Visuals (Non-interactive)
+            IgnorePointer(
+              child: Stack(
+                children: [
+                  // Original (Left side)
+                  Positioned.fill(
+                    child: ClipRect(
+                      clipper: _LeftClipper(_splitPosition),
+                      child: InteractiveViewer(
+                        transformationController: _controller,
+                        minScale: 0.1,
+                        maxScale: 5.0,
+                        boundaryMargin: const EdgeInsets.all(double.infinity),
+                        child: widget.original,
+                      ),
+                    ),
+                  ),
+
+                  // Compressed (Right side)
+                  if (widget.compressed != null)
+                    Positioned.fill(
+                      child: ClipRect(
+                        clipper: _RightClipper(_splitPosition),
+                        child: InteractiveViewer(
+                          transformationController: _controller,
+                          minScale: 0.1,
+                          maxScale: 5.0,
+                          boundaryMargin: const EdgeInsets.all(double.infinity),
+                          child: widget.compressed!,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+
+            // Layer 2: Gesture Handler (Invisible)
             Positioned.fill(
-              child: ClipRect(
-                clipper: _LeftClipper(_splitPosition),
-                child: InteractiveViewer(
-                  transformationController: _controller,
-                  minScale: 0.1,
-                  maxScale: 5.0,
-                  boundaryMargin: const EdgeInsets.all(double.infinity),
+              child: InteractiveViewer(
+                transformationController: _controller,
+                minScale: 0.1,
+                maxScale: 5.0,
+                boundaryMargin: const EdgeInsets.all(double.infinity),
+                child: Opacity(
+                  opacity: 0.0,
                   child: widget.original,
                 ),
               ),
             ),
-
-            // Layer 2: Compressed (Right side)
-            if (widget.compressed != null)
-              Positioned.fill(
-                child: ClipRect(
-                  clipper: _RightClipper(_splitPosition),
-                  child: InteractiveViewer(
-                    transformationController: _controller,
-                    minScale: 0.1,
-                    maxScale: 5.0,
-                    boundaryMargin: const EdgeInsets.all(double.infinity),
-                    child: widget.compressed!,
-                  ),
-                ),
-              ),
 
             // Layer 3: Slider Handle
             Positioned(
@@ -65,40 +86,43 @@ class _BeforeAfterState extends State<BeforeAfter> {
               top: 0,
               bottom: 0,
               width: 50,
-              child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onHorizontalDragUpdate: (details) {
-                  setState(() {
-                    _splitPosition += details.delta.dx / constraints.maxWidth;
-                    _splitPosition = _splitPosition.clamp(0.0, 1.0);
-                  });
-                },
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    // Vertical Line
-                    CustomPaint(
-                      size: const Size(4, double.infinity),
-                      painter: _SliderLinePainter(),
-                    ),
-                    // Handle Icon
-                    Container(
-                      width: 44,
-                      height: 44,
-                      decoration: const BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black26,
-                            blurRadius: 4,
-                            offset: Offset(0, 2),
-                          ),
-                        ],
+              child: MouseRegion(
+                cursor: SystemMouseCursors.resizeLeftRight,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onHorizontalDragUpdate: (details) {
+                    setState(() {
+                      _splitPosition += details.delta.dx / constraints.maxWidth;
+                      _splitPosition = _splitPosition.clamp(0.0, 1.0);
+                    });
+                  },
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      // Vertical Line
+                      CustomPaint(
+                        size: const Size(4, double.infinity),
+                        painter: _SliderLinePainter(),
                       ),
-                      child: const Icon(Icons.compare_arrows, size: 28, color: Colors.black),
-                    ),
-                  ],
+                      // Handle Icon
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: const BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black26,
+                              blurRadius: 4,
+                              offset: Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: const Icon(Icons.compare_arrows, size: 28, color: Colors.black),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

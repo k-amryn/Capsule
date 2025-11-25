@@ -37,11 +37,13 @@ class VideoEditor extends StatefulWidget {
 }
 
 class _VideoEditorState extends State<VideoEditor> {
-  VideoPlayerController? _originalController;
+  VideoPlayerController? _fullOriginalController;
+  VideoPlayerController? _activeOriginalController;
   VideoPlayerController? _compressedController;
   
   bool _isCompressing = false;
   bool _isPreviewing = false;
+  bool _isRemuxing = false;
   double _bitrate = 5000; // kbps
   double _maxBitrate = 10000; // kbps
   String _outputFormat = 'av1'; // av1 or vp9
@@ -91,55 +93,216 @@ class _VideoEditorState extends State<VideoEditor> {
   void dispose() {
     _debounceTimer?.cancel();
     _currentPreviewTask?.cancel();
-    _originalController?.dispose();
+    _fullOriginalController?.dispose();
+    if (_activeOriginalController != _fullOriginalController) {
+      _activeOriginalController?.dispose();
+    }
     _compressedController?.dispose();
     super.dispose();
   }
 
   Future<void> _initializeVideo() async {
-    final controller = VideoPlayerController.file(File(widget.file.path));
-    await controller.initialize();
+    // Dispose previous controllers to free resources
+    _fullOriginalController?.dispose();
+    _fullOriginalController = null;
+    _activeOriginalController = null;
     
-    // Check for hardware acceleration
     try {
-      _hasAv1Hardware = await _ffmpegService.hasEncoder('av1_videotoolbox');
-      if (_hasAv1Hardware) {
-        debugPrint('AV1 Hardware Acceleration detected!');
-      } else {
-        debugPrint('AV1 Hardware Acceleration NOT detected.');
+      debugPrint('Initializing video: ${widget.file.path}');
+      final file = File(widget.file.path);
+      if (!await file.exists()) {
+        throw Exception('File does not exist');
       }
-    } catch (e) {
-      debugPrint('Error checking encoders: $e');
-    }
 
-    // Get media info to set max bitrate
-    try {
-      final info = await _ffmpegService.getMediaInfo(widget.file.path);
-      if (info.bitrate > 0) {
+      // 1. Get file size and media info BEFORE initializing player
+      // This avoids concurrent access issues on external drives
+      int size = 0;
+      try {
+        size = await file.length();
+      } catch (e) {
+        debugPrint('Error getting file size: $e');
+      }
+
+      // Check for hardware acceleration
+      try {
+        _hasAv1Hardware = await _ffmpegService.hasEncoder('av1_videotoolbox');
+      } catch (e) {
+        debugPrint('Error checking encoders: $e');
+      }
+
+      // Get media info to set max bitrate
+      try {
+        final info = await _ffmpegService.getMediaInfo(widget.file.path);
+        if (info.bitrate > 0) {
+          setState(() {
+            _maxBitrate = info.bitrate.toDouble();
+            // Set default bitrate to 50% of original or 5000, whichever is lower
+            _bitrate = (_maxBitrate * 0.5).clamp(10.0, 5000.0);
+          });
+        }
+      } catch (e) {
+        debugPrint('Error getting media info: $e');
+      }
+
+      // 2. Initialize VideoPlayer
+      VideoPlayerController controller = VideoPlayerController.file(file);
+      try {
+        await controller.initialize();
+      } catch (e) {
+        debugPrint('Native initialization failed: $e');
+        // If native initialization fails, try to recover (Symlink or Remux)
+        // This handles renamed files (MP4 named as MKV) and incompatible containers (Real MKV, AVI)
+        // Error 12847: Format not supported
+        // Error 12848: Media damaged (often returned for incompatible containers like AVI)
+        final errorStr = e.toString();
+        if (errorStr.contains('not supported') ||
+            errorStr.contains('damaged') ||
+            errorStr.contains('12847') ||
+            errorStr.contains('12848')) {
+           await _recoverAndInitialize(file);
+           return;
+        }
+        rethrow;
+      }
+      
+      if (!mounted) {
+        controller.dispose();
+        return;
+      }
+
+      setState(() {
+        _fullOriginalController = controller;
+        _activeOriginalController = controller;
+        _videoDuration = controller.value.duration;
+        _originalSize = _formatBytes(size);
+      });
+      
+      // 3. Generate initial preview
+      // Add a small delay to let AVPlayer settle
+      await Future.delayed(const Duration(milliseconds: 200));
+      _generatePreview();
+    } catch (e) {
+      debugPrint('Error initializing video: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading video: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
         setState(() {
-          _maxBitrate = info.bitrate.toDouble();
-          // Set default bitrate to 50% of original or 5000, whichever is lower
-          _bitrate = (_maxBitrate * 0.5).clamp(10.0, 5000.0);
+          _isRemuxing = false;
         });
       }
+    }
+  }
+
+  Future<void> _recoverAndInitialize(File originalFile) async {
+    setState(() {
+      _isRemuxing = true;
+    });
+
+    try {
+      final tempDir = await getTemporaryDirectory();
+      
+      // Strategy 1: Try Symlink with .mp4 extension (Zero Copy)
+      // This fixes cases where the file is actually MP4 but has wrong extension (e.g. .mkv)
+      final symlinkPath = '${tempDir.path}/preview_symlink.mp4';
+      final symlinkFile = File(symlinkPath);
+      if (await symlinkFile.exists()) {
+        await symlinkFile.delete();
+      }
+      
+      try {
+        debugPrint('Attempting symlink recovery...');
+        final link = Link(symlinkPath);
+        await link.create(originalFile.path);
+        
+        final controller = VideoPlayerController.file(File(symlinkPath));
+        await controller.initialize();
+        
+        // If we got here, symlink worked!
+        debugPrint('Symlink recovery successful!');
+        await _applyController(controller, originalFile);
+        return;
+      } catch (e) {
+        debugPrint('Symlink recovery failed: $e');
+        // Fallthrough to remux
+      }
+
+      // Strategy 2: Remux to MP4 (Fast Copy)
+      // This handles incompatible containers (Real MKV) by copying streams to MP4
+      final remuxPath = '${tempDir.path}/preview_remux.mp4';
+      debugPrint('Remuxing to $remuxPath for preview...');
+      
+      try {
+        await _ffmpegService.execute(
+          '-y -i "${originalFile.path}" -c copy -movflags +faststart "$remuxPath"'
+        ).then((t) => t.done);
+      } catch (e) {
+        debugPrint('Simple remux failed, trying with AAC audio: $e');
+        try {
+          await _ffmpegService.execute(
+            '-y -i "${originalFile.path}" -c:v copy -c:a aac -movflags +faststart "$remuxPath"'
+          ).then((t) => t.done);
+        } catch (e2) {
+          debugPrint('Remux with AAC failed, falling back to transcoding (slow): $e2');
+          // Strategy 3: Transcode to H.264 (Slow but compatible)
+          // This handles incompatible codecs (WMV3, etc.) that cannot be put in MP4
+          // Use ultrafast preset to minimize wait time
+          await _ffmpegService.execute(
+            '-y -i "${originalFile.path}" -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart "$remuxPath"'
+          ).then((t) => t.done);
+        }
+      }
+
+      final controller = VideoPlayerController.file(File(remuxPath));
+      await controller.initialize();
+      await _applyController(controller, originalFile);
+
     } catch (e) {
-      debugPrint('Error getting media info: $e');
+      debugPrint('Recovery failed: $e');
+      throw Exception('Could not prepare video for preview: $e');
+    }
+  }
+
+  Future<void> _applyController(VideoPlayerController controller, File originalFile) async {
+    if (!mounted) {
+      controller.dispose();
+      return;
     }
 
-    final size = await File(widget.file.path).length();
-
     setState(() {
-      _originalController = controller;
+      _fullOriginalController = controller;
+      _activeOriginalController = controller;
       _videoDuration = controller.value.duration;
-      _originalSize = _formatBytes(size);
     });
-    // Generate initial preview at start
+    
+    // Get original size if not set
+    if (_originalSize == null) {
+       try {
+         final size = await originalFile.length();
+         setState(() {
+           _originalSize = _formatBytes(size);
+         });
+       } catch (_) {}
+    }
+
+    await Future.delayed(const Duration(milliseconds: 200));
     _generatePreview();
   }
 
   void _onScrubChanged(double value) {
     setState(() {
       _scrubPosition = value;
+      // Switch back to full original controller for scrubbing
+      if (_fullOriginalController != null) {
+        _activeOriginalController = _fullOriginalController;
+        final target = _videoDuration * value;
+        _fullOriginalController!.seekTo(target);
+        // Pause compressed preview or hide it while scrubbing
+        // _compressedController = null; // Optional: hide compressed while scrubbing
+      }
     });
     _debouncePreview();
   }
@@ -168,24 +331,35 @@ class _VideoEditorState extends State<VideoEditor> {
         Positioned.fill(
           child: Container(
             color: Colors.transparent,
-            child: _originalController != null && _originalController!.value.isInitialized
-                ? BeforeAfter(
-                    original: Center(
-                      child: AspectRatio(
-                        aspectRatio: _originalController!.value.aspectRatio,
-                        child: VideoPlayer(_originalController!),
-                      ),
+            child: _isRemuxing
+                ? const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 16),
+                        Text('Preparing preview...', style: TextStyle(color: Colors.white)),
+                      ],
                     ),
-                    compressed: _compressedController != null && _compressedController!.value.isInitialized
-                        ? Center(
-                            child: AspectRatio(
-                              aspectRatio: _compressedController!.value.aspectRatio,
-                              child: VideoPlayer(_compressedController!),
-                            ),
-                          )
-                        : null,
                   )
-                : const Center(child: CircularProgressIndicator()),
+                : _activeOriginalController != null && _activeOriginalController!.value.isInitialized
+                    ? BeforeAfter(
+                        original: Center(
+                          child: AspectRatio(
+                            aspectRatio: _activeOriginalController!.value.aspectRatio,
+                            child: VideoPlayer(_activeOriginalController!),
+                          ),
+                        ),
+                        compressed: _compressedController != null && _compressedController!.value.isInitialized
+                            ? Center(
+                                child: AspectRatio(
+                                  aspectRatio: _compressedController!.value.aspectRatio,
+                                  child: VideoPlayer(_compressedController!),
+                                ),
+                              )
+                            : null,
+                      )
+                    : const Center(child: CircularProgressIndicator()),
           ),
         ),
 
@@ -209,7 +383,6 @@ class _VideoEditorState extends State<VideoEditor> {
             estimatedSize: _estimateSize(),
             hasAv1Hardware: _hasAv1Hardware,
             resolution: _resolution,
-            originalResolution: _originalController?.value.size,
             onScrubChanged: _onScrubChanged,
             onScrubEnd: (value) {
               _debounceTimer?.cancel();
@@ -245,6 +418,7 @@ class _VideoEditorState extends State<VideoEditor> {
                 _generatePreview();
               }
             },
+            originalResolution: _fullOriginalController?.value.size,
             onBitrateChanged: _onBitrateChanged,
             onBitrateEnd: (value) {
               _debounceTimer?.cancel();
@@ -273,7 +447,7 @@ class _VideoEditorState extends State<VideoEditor> {
   }
 
   Future<void> _generatePreview() async {
-    if (_originalController == null) return;
+    if (_fullOriginalController == null) return;
     
     // Cancel previous task if running
     _currentPreviewTask?.cancel();
@@ -385,7 +559,7 @@ class _VideoEditorState extends State<VideoEditor> {
       }
 
       // 3. Update players
-      final oldOriginal = _originalController;
+      final oldOriginal = _activeOriginalController;
       final oldCompressed = _compressedController;
 
       final newOriginal = VideoPlayerController.file(File(originalClipPath));
@@ -405,14 +579,16 @@ class _VideoEditorState extends State<VideoEditor> {
 
       if (mounted) {
         setState(() {
-          _originalController = newOriginal;
+          _activeOriginalController = newOriginal;
           _compressedController = newCompressed;
           _isPreviewing = false;
         });
       }
 
-      // Dispose old controllers
-      oldOriginal?.dispose();
+      // Dispose old controllers (only if they are not the full original)
+      if (oldOriginal != _fullOriginalController) {
+        oldOriginal?.dispose();
+      }
       oldCompressed?.dispose();
 
     } catch (e) {

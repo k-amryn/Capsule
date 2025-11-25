@@ -13,8 +13,6 @@ import '../image_editor.dart';
 import '../models/compression_settings.dart';
 import '../video_editor.dart';
 
-enum MediaType { video, image, audio }
-
 class BatchView extends StatefulWidget {
   final List<XFile> files;
   final MediaType mediaType;
@@ -63,6 +61,10 @@ class _BatchViewState extends State<BatchView> {
         break;
       case MediaType.audio:
         _settings = AudioSettings();
+        break;
+      case MediaType.unknown:
+        // Should not happen in batch view as we filter before
+        _settings = ImageSettings();
         break;
     }
   }
@@ -217,6 +219,8 @@ class _BatchViewState extends State<BatchView> {
           batchProgress: _isSaving ? _batchProgress : null,
           progressLabel: progressLabel,
         );
+      case MediaType.unknown:
+        return const Center(child: Text('Unknown media type'));
     }
   }
 
@@ -345,10 +349,27 @@ class _BatchViewState extends State<BatchView> {
       if (s.outputFormat == 'png') {
         command = '-y -i "${file.path}" $scaleFilter -frames:v 1 -update 1 "$outputPath"';
       } else if (s.outputFormat == 'webp') {
-        command = '-y -i "${file.path}" $scaleFilter -q:v ${s.quality.round()} -pix_fmt yuv420p -frames:v 1 -update 1 "$outputPath"';
+        command = '-y -i "${file.path}" $scaleFilter -q:v ${s.quality.round()} -pix_fmt yuva420p -frames:v 1 -update 1 "$outputPath"';
       } else if (s.outputFormat == 'avif') {
         int crf = (63 - ((s.quality - 1) * (63 / 99))).round().clamp(0, 63);
-        command = '-y -i "${file.path}" $scaleFilter -c:v libaom-av1 -crf $crf -cpu-used 6 -pix_fmt yuv420p -frames:v 1 -update 1 "$outputPath"';
+        
+        // Check if yuva420p is supported by the encoder
+        bool supportsYuva420p = await _ffmpegService.hasPixelFormat('libaom-av1', 'yuva420p');
+
+        if (supportsYuva420p) {
+          command = '-y -i "${file.path}" $scaleFilter -c:v libaom-av1 -crf $crf -cpu-used 6 -pix_fmt yuva420p -frames:v 1 -update 1 "$outputPath"';
+        } else {
+          String filterComplex;
+          if (scaleFilter.isNotEmpty) {
+            // Extract scale parameters from "-vf scale=..."
+            final scaleParams = scaleFilter.replaceAll('-vf ', '');
+            filterComplex = '[0:v]$scaleParams[scaled];[scaled]format=rgba[in];[in]split=2[color_in][alpha_in];[color_in]format=yuv420p[color];[alpha_in]alphaextract,format=gray,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709[alpha]';
+          } else {
+            filterComplex = '[0:v]format=rgba[in];[in]split=2[color_in][alpha_in];[color_in]format=yuv420p[color];[alpha_in]alphaextract,format=gray,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709[alpha]';
+          }
+
+          command = '-y -i "${file.path}" -filter_complex "$filterComplex" -map "[color]" -map "[alpha]" -c:v libaom-av1 -crf $crf -cpu-used 6 -frames:v 1 -update 1 "$outputPath"';
+        }
       } else {
         // JPEG
         int qValue = (31 - ((s.quality - 1) * (29 / 99))).round().clamp(2, 31);

@@ -45,6 +45,16 @@ class _ImageEditorState extends State<ImageEditor> {
   double _resolution = 1.0; // 1.0, 0.5, 0.25
   Size? _originalResolution;
   late FfmpegService _ffmpegService;
+  FfmpegTask? _currentTask;
+  int _jobId = 0;
+  int _previewJobId = 0;
+  int _previewKey = 0;
+
+  @override
+  void dispose() {
+    _currentTask?.cancel();
+    super.dispose();
+  }
   
   @override
   void initState() {
@@ -98,6 +108,7 @@ class _ImageEditorState extends State<ImageEditor> {
               compressed: _compressedFile != null
                   ? Image.file(
                       _compressedFile!,
+                      key: ValueKey(_previewKey),
                       fit: BoxFit.contain,
                       alignment: Alignment.center,
                     )
@@ -248,40 +259,42 @@ class _ImageEditorState extends State<ImageEditor> {
                   ],
 
                   // Quality Slider
-                  SizedBox(
-                    height: 40,
-                    child: Row(
-                      children: [
-                        const Text('Quality: '),
-                        Expanded(
-                          child: Slider(
-                            value: _quality,
-                            min: 1,
-                            max: 100,
-                            divisions: 100,
-                            label: _quality.round().toString(),
-                            onChanged: (double value) {
-                              setState(() {
-                                _quality = value;
-                              });
-                            },
-                            onChangeEnd: (double value) {
-                              if (widget.onSettingsChanged != null) {
-                                widget.onSettingsChanged!(ImageSettings(
-                                  outputFormat: _outputFormat,
-                                  quality: _quality,
-                                  resolution: _resolution,
-                                ));
-                              }
-                              _compressImage();
-                            },
+                  if (_outputFormat != 'png') ...[
+                    SizedBox(
+                      height: 40,
+                      child: Row(
+                        children: [
+                          const Text('Quality: '),
+                          Expanded(
+                            child: Slider(
+                              value: _quality,
+                              min: 1,
+                              max: 100,
+                              divisions: 100,
+                              label: _quality.round().toString(),
+                              onChanged: (double value) {
+                                setState(() {
+                                  _quality = value;
+                                });
+                              },
+                              onChangeEnd: (double value) {
+                                if (widget.onSettingsChanged != null) {
+                                  widget.onSettingsChanged!(ImageSettings(
+                                    outputFormat: _outputFormat,
+                                    quality: _quality,
+                                    resolution: _resolution,
+                                  ));
+                                }
+                                _compressImage();
+                              },
+                            ),
                           ),
-                        ),
-                        Text('${_quality.round()}%'),
-                      ],
+                          Text('${_quality.round()}%'),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 8),
+                    const SizedBox(height: 8),
+                  ],
 
                   // Actions
                   Row(
@@ -325,6 +338,9 @@ class _ImageEditorState extends State<ImageEditor> {
   }
 
   Future<void> _generatePreview() async {
+    _previewJobId++;
+    final myJobId = _previewJobId;
+
     final ext = p.extension(widget.file.path).toLowerCase();
     if (ext == '.avif' || ext == '.heic') {
       // Convert AVIF/HEIC to PNG for preview
@@ -333,13 +349,20 @@ class _ImageEditorState extends State<ImageEditor> {
         final previewPath = '${tempDir.path}/preview.png';
         final previewFile = File(previewPath);
 
-        if (await previewFile.exists()) {
-          await previewFile.delete();
+        try {
+          if (await previewFile.exists()) {
+            await previewFile.delete();
+          }
+        } catch (e) {
+          // Ignore race conditions
         }
 
         // Convert to PNG
-        final task = await _ffmpegService.execute('-y -i "${widget.file.path}" -frames:v 1 -update 1 "$previewPath"');
+        // Use rgba to ensure transparency is preserved if source has it
+        final task = await _ffmpegService.execute('-y -i "${widget.file.path}" -pix_fmt rgba -frames:v 1 -update 1 "$previewPath"');
         await task.done;
+
+        if (myJobId != _previewJobId) return;
 
         if (await previewFile.exists()) {
           // Clear cache
@@ -384,10 +407,15 @@ class _ImageEditorState extends State<ImageEditor> {
   }
 
   Future<void> _compressImage() async {
+    _jobId++;
+    final myJobId = _jobId;
+
+    _currentTask?.cancel();
+    _currentTask = null;
+
     setState(() {
       _isCompressing = true;
-      _compressedFile = null;
-      _compressedSize = null;
+      // Keep old compressed file visible while new one loads
     });
 
     try {
@@ -403,8 +431,12 @@ class _ImageEditorState extends State<ImageEditor> {
 
       // Delete previous temp file if exists
       final outputFile = File(outputPath);
-      if (await outputFile.exists()) {
-        await outputFile.delete();
+      try {
+        if (await outputFile.exists()) {
+          await outputFile.delete();
+        }
+      } catch (e) {
+        // Ignore race conditions where file is deleted by another process
       }
 
       debugPrint('Starting compression for ${widget.file.path}');
@@ -428,35 +460,66 @@ class _ImageEditorState extends State<ImageEditor> {
         command = '-y -i "${widget.file.path}" $scaleFilter -frames:v 1 -update 1 "$outputPath"';
       } else if (_outputFormat == 'webp') {
         // WEBP (0-100 quality)
-        command = '-y -i "${widget.file.path}" $scaleFilter -q:v ${_quality.round()} -pix_fmt yuv420p -frames:v 1 -update 1 "$outputPath"';
+        // Use yuva420p for transparency support
+        command = '-y -i "${widget.file.path}" $scaleFilter -q:v ${_quality.round()} -pix_fmt yuva420p -frames:v 1 -update 1 "$outputPath"';
       } else if (_outputFormat == 'avif') {
         // AVIF
         int crf = (63 - ((_quality - 1) * (63 / 99))).round();
         crf = crf.clamp(0, 63);
-        // Use yuv420p pixel format for better compatibility
-        command = '-y -i "${widget.file.path}" $scaleFilter -c:v libaom-av1 -crf $crf -cpu-used 6 -pix_fmt yuv420p -frames:v 1 -update 1 "$outputPath"';
+        
+        // Check if yuva420p is supported by the encoder
+        bool supportsYuva420p = await _ffmpegService.hasPixelFormat('libaom-av1', 'yuva420p');
+        
+        if (supportsYuva420p) {
+          // Use native transparency support
+          command = '-y -i "${widget.file.path}" $scaleFilter -c:v libaom-av1 -crf $crf -cpu-used 6 -pix_fmt yuva420p -frames:v 1 -update 1 "$outputPath"';
+        } else {
+          // Use dual-stream encoding for transparency support
+          String filterComplex;
+          if (scaleFilter.isNotEmpty) {
+            // Extract scale parameters from "-vf scale=..."
+            final scaleParams = scaleFilter.replaceAll('-vf ', '');
+            filterComplex = '[0:v]$scaleParams[scaled];[scaled]format=rgba[in];[in]split=2[color_in][alpha_in];[color_in]format=yuv420p[color];[alpha_in]alphaextract,format=gray,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709[alpha]';
+          } else {
+            filterComplex = '[0:v]format=rgba[in];[in]split=2[color_in][alpha_in];[color_in]format=yuv420p[color];[alpha_in]alphaextract,format=gray,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709[alpha]';
+          }
+          
+          command = '-y -i "${widget.file.path}" -filter_complex "$filterComplex" -map "[color]" -map "[alpha]" -c:v libaom-av1 -crf $crf -cpu-used 6 -frames:v 1 -update 1 "$outputPath"';
+        }
       } else {
         // JPEG
         command = '-y -i "${widget.file.path}" $scaleFilter -q:v $qValue -pix_fmt yuvj420p -frames:v 1 -update 1 "$outputPath"';
       }
 
       final task = await _ffmpegService.execute(command);
+      _currentTask = task;
       await task.done;
+      _currentTask = null;
+
+      if (myJobId != _jobId) {
+        debugPrint('Compression finished but job is stale (new job started)');
+        return;
+      }
 
       debugPrint('Compression finished');
 
       if (await outputFile.exists()) {
         final size = await outputFile.length();
 
-        // Force image cache eviction to ensure UI updates
-        PaintingBinding.instance.imageCache.clear();
-        PaintingBinding.instance.imageCache.clearLiveImages();
+        if (size > 0) {
+          // Force image cache eviction to ensure UI updates
+          PaintingBinding.instance.imageCache.clear();
+          PaintingBinding.instance.imageCache.clearLiveImages();
 
-        if (mounted) {
-          setState(() {
-            _compressedFile = outputFile;
-            _compressedSize = _formatBytes(size);
-          });
+          if (mounted) {
+            setState(() {
+              _compressedFile = outputFile;
+              _compressedSize = _formatBytes(size);
+              _previewKey++;
+            });
+          }
+        } else {
+          debugPrint('Compression failed: Output file is empty');
         }
       } else {
         debugPrint('Compression failed: Output file not created');
@@ -467,6 +530,10 @@ class _ImageEditorState extends State<ImageEditor> {
         }
       }
     } catch (e, stackTrace) {
+      if (e.toString().contains('cancelled')) {
+        debugPrint('Compression cancelled');
+        return;
+      }
       debugPrint('Error compressing: $e');
       debugPrint('Stack trace: $stackTrace');
       if (mounted) {

@@ -6,11 +6,14 @@ import '../audio_editor.dart';
 import '../image_editor.dart';
 import '../video_editor.dart';
 
+import '../ffmpeg_service.dart';
+
 class CompressView extends StatefulWidget {
   final XFile? initialFile;
+  final MediaType? mediaType;
   final VoidCallback? onClose;
 
-  const CompressView({super.key, this.initialFile, this.onClose});
+  const CompressView({super.key, this.initialFile, this.mediaType, this.onClose});
 
   @override
   State<CompressView> createState() => _CompressViewState();
@@ -61,15 +64,40 @@ class _CompressViewState extends State<CompressView> {
       );
     }
 
-    final ext = p.extension(_droppedFile!.path).toLowerCase();
-    if (['.mp4', '.webm', '.mkv', '.mov', '.avi'].contains(ext)) {
+    // Use provided media type if available, otherwise fallback to extension check
+    if (widget.mediaType == MediaType.video) {
       return VideoEditor(
         file: _droppedFile!,
         onClear: () {
           widget.onClose?.call();
         },
       );
-    } else if (['.mp3', '.aac', '.ogg', '.wav', '.flac', '.m4a', '.opus', '.aiff'].contains(ext)) {
+    } else if (widget.mediaType == MediaType.audio) {
+      return AudioEditor(
+        file: _droppedFile!,
+        onClear: () {
+          widget.onClose?.call();
+        },
+      );
+    } else if (widget.mediaType == MediaType.image) {
+      return ImageEditor(
+        file: _droppedFile!,
+        onClear: () {
+          widget.onClose?.call();
+        },
+      );
+    }
+
+    // Fallback to extension check if type is unknown or not provided
+    final ext = p.extension(_droppedFile!.path).toLowerCase();
+    if (['.mp4', '.webm', '.mkv', '.mov', '.avi', '.flv', '.wmv', '.m4v', '.ts', '.3gp'].contains(ext)) {
+      return VideoEditor(
+        file: _droppedFile!,
+        onClear: () {
+          widget.onClose?.call();
+        },
+      );
+    } else if (['.mp3', '.aac', '.ogg', '.wav', '.flac', '.m4a', '.opus', '.aiff', '.wma'].contains(ext)) {
       return AudioEditor(
         file: _droppedFile!,
         onClear: () {
@@ -77,6 +105,7 @@ class _CompressViewState extends State<CompressView> {
         },
       );
     } else {
+      // Default to image editor for unknown types (it might handle it or fail gracefully)
       return ImageEditor(
         file: _droppedFile!,
         onClear: () {

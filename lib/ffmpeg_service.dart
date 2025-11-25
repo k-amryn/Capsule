@@ -9,11 +9,20 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 
+enum MediaType { video, audio, image, unknown }
+
 class MediaInfo {
   final Duration duration;
   final int bitrate; // kbps
 
   MediaInfo({required this.duration, required this.bitrate});
+}
+
+class ProbeResult {
+  final MediaType type;
+  final bool isSupported;
+
+  ProbeResult({required this.type, required this.isSupported});
 }
 
 class FfmpegTask {
@@ -26,7 +35,9 @@ class FfmpegTask {
 abstract class FfmpegService {
   Future<FfmpegTask> execute(String command, {void Function(double progress)? onProgress, Duration? totalDuration});
   Future<MediaInfo> getMediaInfo(String path);
+  Future<ProbeResult> probeFile(String path);
   Future<bool> hasEncoder(String encoderName);
+  Future<bool> hasPixelFormat(String encoderName, String pixelFormat);
   Future<void> init();
 }
 
@@ -137,13 +148,72 @@ class MobileFfmpegService implements FfmpegService {
   }
 
   @override
+  Future<ProbeResult> probeFile(String path) async {
+    final session = await FFprobeKit.getMediaInformation(path);
+    final info = session.getMediaInformation();
+    
+    if (info == null) {
+      return ProbeResult(type: MediaType.unknown, isSupported: false);
+    }
+
+    final streams = info.getStreams();
+    bool hasVideo = false;
+    bool hasAudio = false;
+
+    for (final stream in streams) {
+      if (stream.getType() == 'video') {
+        // Check if it's an attached picture (cover art)
+        // FFprobeKit Stream object might have disposition
+        // But here we are using FFprobeKit which returns objects.
+        // Let's check if we can detect attached pic.
+        // The Stream object has getAllProperties().
+        final props = stream.getAllProperties();
+        bool isAttachedPic = false;
+        if (props != null && props['disposition'] != null) {
+           final disposition = props['disposition'];
+           if (disposition is Map) {
+             if (disposition['attached_pic'] == 1) {
+               isAttachedPic = true;
+             }
+           }
+        }
+        
+        if (!isAttachedPic) {
+          hasVideo = true;
+        }
+      } else if (stream.getType() == 'audio') {
+        hasAudio = true;
+      }
+    }
+
+    if (hasVideo) {
+      // Check if it's an image (single frame video stream usually, or specific codec)
+      // But FFprobe usually distinguishes images if format is image2
+      // For simplicity, if it has video stream, treat as video unless duration is very short/0?
+      // Actually, images are often detected as video streams with 1 frame.
+      // Let's check format name.
+      final format = info.getFormat();
+      if (format != null && (format.contains('image') || format.contains('png') || format.contains('jpeg') || format.contains('webp'))) {
+         return ProbeResult(type: MediaType.image, isSupported: true);
+      }
+      return ProbeResult(type: MediaType.video, isSupported: true);
+    } else if (hasAudio) {
+      return ProbeResult(type: MediaType.audio, isSupported: true);
+    }
+
+    return ProbeResult(type: MediaType.unknown, isSupported: false);
+  }
+
+  @override
   Future<bool> hasEncoder(String encoderName) async {
     // FFmpegKit min-gpl has standard encoders.
-    // We can't easily check at runtime without parsing "ffmpeg -encoders".
-    // But for now, let's assume standard ones are present.
-    // If checking for hardware acceleration (videotoolbox/mediacodec),
-    // min-gpl might not have them enabled or exposed easily via this check.
-    // For Android, 'h264_mediacodec' might be available.
+    return false;
+  }
+
+  @override
+  Future<bool> hasPixelFormat(String encoderName, String pixelFormat) async {
+    // Assume standard formats are supported on mobile
+    if (pixelFormat == 'yuva420p') return true;
     return false;
   }
 }
@@ -155,22 +225,28 @@ class DesktopFfmpegService implements FfmpegService {
   Future<void> init() async {
     if (_binaryPath != null) return;
 
-    // Check for system ffmpeg first
-    final systemPaths = [
-      '/opt/homebrew/bin/ffmpeg', // Apple Silicon Homebrew
-      '/usr/local/bin/ffmpeg',    // Intel Homebrew
-      '/usr/bin/ffmpeg',          // System (rarely has codecs)
-    ];
-
-    for (final path in systemPaths) {
-      if (await File(path).exists()) {
-        _binaryPath = path;
-        debugPrint('Using system FFmpeg at $_binaryPath');
-        return;
+    // Check if system ffmpeg is available
+    try {
+      final result = await Process.run(
+        Platform.isWindows ? 'where' : 'which',
+        ['ffmpeg'],
+      );
+      
+      if (result.exitCode == 0) {
+        final systemPath = result.stdout.toString().trim().split('\n').first;
+        if (systemPath.isNotEmpty) {
+          _binaryPath = systemPath;
+          debugPrint('Using system FFmpeg at $_binaryPath');
+          return;
+        }
       }
+    } catch (e) {
+      debugPrint('Error checking for system ffmpeg: $e');
     }
 
     // Fallback to bundled ffmpeg
+    debugPrint('System FFmpeg not found, using bundled binary');
+    
     final appDir = await getApplicationSupportDirectory();
     final binDir = Directory(p.join(appDir.path, 'bin'));
     if (!await binDir.exists()) {
@@ -208,22 +284,31 @@ class DesktopFfmpegService implements FfmpegService {
 
     final args = _parseArgs(command);
     
+    // Add -nostdin to prevent hanging if ffmpeg waits for input
+    if (!args.contains('-nostdin')) {
+      args.insert(0, '-nostdin');
+    }
+    
     debugPrint('Executing: $_binaryPath ${args.join(' ')}');
 
     final process = await Process.start(_binaryPath!, args);
     bool isCancelled = false;
 
     // Listen to stderr for progress (FFmpeg writes stats to stderr)
-    process.stderr.transform(utf8.decoder).listen((data) {
+    process.stderr.transform(const Utf8Decoder(allowMalformed: true)).listen((data) {
       // debugPrint('FFmpeg stderr: $data'); // Too verbose for rapid updates
       if (onProgress != null && totalDuration != null) {
         _parseProgress(data, totalDuration, onProgress);
       }
+    }, onError: (e) {
+      debugPrint('FFmpeg stderr error: $e');
     });
 
     // Also listen to stdout just in case
-    process.stdout.transform(utf8.decoder).listen((data) {
+    process.stdout.transform(const Utf8Decoder(allowMalformed: true)).listen((data) {
       debugPrint('FFmpeg stdout: $data');
+    }, onError: (e) {
+      debugPrint('FFmpeg stdout error: $e');
     });
 
     final doneFuture = process.exitCode.then((exitCode) {
@@ -285,6 +370,64 @@ class DesktopFfmpegService implements FfmpegService {
   }
 
   @override
+  Future<ProbeResult> probeFile(String path) async {
+    if (_binaryPath == null) {
+      await init();
+    }
+
+    // Run ffmpeg -i path
+    // We rely on ffmpeg output to detect streams
+    // Add -nostdin to prevent hanging if ffmpeg waits for input
+    final result = await Process.run(_binaryPath!, ['-nostdin', '-i', path]);
+    final output = result.stderr.toString();
+    
+    debugPrint('Probe output for $path:\n$output');
+
+    // Parse output line by line to detect streams and ignore attached pics
+    final lines = output.split('\n');
+    bool hasVideo = false;
+    bool hasAudio = false;
+    
+    for (final line in lines) {
+      if (line.contains('Video:')) {
+        // Check if it's an attached picture (cover art)
+        // Stream #0:1: Video: mjpeg, ... (attached pic)
+        if (!line.contains('(attached pic)') && !line.contains('attached_pic')) {
+          hasVideo = true;
+        }
+      }
+      if (line.contains('Audio:')) {
+        hasAudio = true;
+      }
+    }
+    
+    // Check for image formats
+    // Input #0, png_pipe, from ...
+    // Input #0, image2, from ...
+    // Input #0, mjpeg, from ...
+    bool isImage = output.contains('image2') || output.contains('png_pipe') || output.contains('jpeg_pipe') || output.contains('bmp_pipe') || output.contains('tiff_pipe') || output.contains('webp_pipe');
+    
+    if (isImage) {
+       return ProbeResult(type: MediaType.image, isSupported: true);
+    }
+
+    if (hasVideo) {
+      return ProbeResult(type: MediaType.video, isSupported: true);
+    } else if (hasAudio) {
+      return ProbeResult(type: MediaType.audio, isSupported: true);
+    }
+
+    // If ffmpeg recognized the format but no streams?
+    // "Input #0, ..."
+    if (output.contains('Input #0')) {
+       // Recognized but maybe no streams or unknown
+       return ProbeResult(type: MediaType.unknown, isSupported: true);
+    }
+
+    return ProbeResult(type: MediaType.unknown, isSupported: false);
+  }
+
+  @override
   Future<bool> hasEncoder(String encoderName) async {
     if (_binaryPath == null) {
       await init();
@@ -297,6 +440,27 @@ class DesktopFfmpegService implements FfmpegService {
     debugPrint('Available encoders check for $encoderName');
     
     return output.contains(encoderName);
+  }
+
+  @override
+  Future<bool> hasPixelFormat(String encoderName, String pixelFormat) async {
+    if (_binaryPath == null) {
+      await init();
+    }
+
+    // Run ffmpeg -h encoder=name
+    final result = await Process.run(_binaryPath!, ['-h', 'encoder=$encoderName']);
+    final output = result.stdout.toString();
+    
+    // Look for "Supported pixel formats: ... pixelFormat ..."
+    // Regex to find the line
+    final regex = RegExp(r'Supported pixel formats:.*');
+    final match = regex.firstMatch(output);
+    if (match != null) {
+      final supported = match.group(0)!;
+      return supported.contains(pixelFormat);
+    }
+    return false;
   }
 
   void _parseProgress(String data, Duration totalDuration, void Function(double) onProgress) {
