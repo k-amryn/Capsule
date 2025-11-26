@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:camera_macos/camera_macos.dart';
+import 'package:camera/camera.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
@@ -10,12 +10,10 @@ enum CaptureMode { photo, video }
 
 class CameraView extends StatefulWidget {
   final ValueChanged<XFile> onCapture;
-  final VoidCallback onClose;
 
   const CameraView({
     super.key,
     required this.onCapture,
-    required this.onClose,
   });
 
   @override
@@ -24,19 +22,59 @@ class CameraView extends StatefulWidget {
 
 class _CameraViewState extends State<CameraView> {
   CaptureMode _mode = CaptureMode.photo;
-  CameraMacOSController? _cameraController;
+  CameraController? _cameraController;
+  List<CameraDescription>? _cameras;
   
   bool _isRecording = false;
-  final GlobalKey _cameraKey = GlobalKey();
+  bool _isInitializing = true;
+  String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
+    _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      _cameras = await availableCameras();
+      if (_cameras != null && _cameras!.isNotEmpty) {
+        // Use the first camera (usually back camera on mobile, or webcam on desktop)
+        final camera = _cameras!.first;
+        _cameraController = CameraController(
+          camera,
+          ResolutionPreset.max,
+          enableAudio: true,
+        );
+
+        await _cameraController!.initialize();
+        if (mounted) {
+          setState(() {
+            _isInitializing = false;
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _isInitializing = false;
+            _errorMessage = 'No cameras found';
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Error initializing camera: $e');
+      if (mounted) {
+        setState(() {
+          _isInitializing = false;
+          _errorMessage = 'Error initializing camera: $e';
+        });
+      }
+    }
   }
 
   @override
   void dispose() {
-    CameraMacOS.instance.destroy();
+    _cameraController?.dispose();
     super.dispose();
   }
 
@@ -47,21 +85,11 @@ class _CameraViewState extends State<CameraView> {
         // Preview Area
         Positioned.fill(
           child: Container(
-            color: Colors.transparent,
+            color: Colors.grey[900],
             child: _buildPreview(),
           ),
         ),
 
-        // Close Button
-        Positioned(
-          top: 10,
-          right: 10,
-          child: IconButton(
-            icon: const Icon(Icons.close, color: Colors.white),
-            onPressed: widget.onClose,
-            tooltip: 'Close Camera',
-          ),
-        ),
 
         // Controls
         Positioned(
@@ -123,15 +151,21 @@ class _CameraViewState extends State<CameraView> {
   }
 
   Widget _buildPreview() {
-    return CameraMacOSView(
-      key: _cameraKey,
-      fit: BoxFit.contain,
-      cameraMode: CameraMacOSMode.photo,
-      onCameraInizialized: (CameraMacOSController controller) {
-        setState(() {
-          _cameraController = controller;
-        });
-      },
+    if (_isInitializing) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_errorMessage != null) {
+      return Center(child: Text(_errorMessage!, style: const TextStyle(color: Colors.white)));
+    }
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return const Center(child: Text('Camera not initialized', style: TextStyle(color: Colors.white)));
+    }
+
+    return Center(
+      child: AspectRatio(
+        aspectRatio: _cameraController!.value.aspectRatio,
+        child: CameraPreview(_cameraController!),
+      ),
     );
   }
 
@@ -157,6 +191,8 @@ class _CameraViewState extends State<CameraView> {
   }
 
   Future<void> _onCaptureTap() async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+
     debugPrint('Capture tapped. Mode: $_mode, Recording: $_isRecording');
     if (_mode == CaptureMode.photo) {
       await _takePhoto();
@@ -170,50 +206,20 @@ class _CameraViewState extends State<CameraView> {
   }
 
   Future<void> _takePhoto() async {
-    if (_cameraController == null) return;
     try {
       debugPrint('Taking photo...');
       final file = await _cameraController!.takePicture();
-      if (file != null) {
-        if (file.url != null) {
-          debugPrint('Photo taken: ${file.url}');
-          widget.onCapture(XFile(file.url!));
-        } else if (file.bytes != null) {
-          debugPrint('Photo taken (bytes): ${file.bytes!.length} bytes');
-          final tempDir = await getTemporaryDirectory();
-          final path = '${tempDir.path}/photo_${DateTime.now().millisecondsSinceEpoch}.jpg';
-          await File(path).writeAsBytes(file.bytes!);
-          widget.onCapture(XFile(path));
-        } else {
-          debugPrint('Photo failed: url and bytes are null');
-        }
-      } else {
-        debugPrint('Photo failed: file is null');
-      }
+      debugPrint('Photo taken: ${file.path}');
+      widget.onCapture(file);
     } catch (e) {
       debugPrint('Error taking photo: $e');
     }
   }
 
   Future<void> _startVideo() async {
-    if (_cameraController == null) return;
     try {
-      final tempDir = await getTemporaryDirectory();
-      final path = '${tempDir.path}/video_capture_${DateTime.now().millisecondsSinceEpoch}.mp4';
-      
-      debugPrint('Starting video recording to $path');
-      await _cameraController!.recordVideo(
-        url: path,
-        onVideoRecordingFinished: (CameraMacOSFile? file, CameraMacOSException? error) {
-           if (error != null) {
-             debugPrint('Video recording error: $error');
-           }
-           if (file != null && file.url != null) {
-             debugPrint('Video recording finished: ${file.url}');
-             widget.onCapture(XFile(file.url!));
-           }
-        }
-      );
+      debugPrint('Starting video recording...');
+      await _cameraController!.startVideoRecording();
       
       setState(() {
         _isRecording = true;
@@ -224,18 +230,15 @@ class _CameraViewState extends State<CameraView> {
   }
 
   Future<void> _stopVideo() async {
-    if (_cameraController == null) return;
     try {
       debugPrint('Stopping video recording...');
-      final file = await _cameraController!.stopRecording();
+      final file = await _cameraController!.stopVideoRecording();
       setState(() {
         _isRecording = false;
       });
       
-      if (file != null && file.url != null) {
-        debugPrint('Video stopped and file returned: ${file.url}');
-        widget.onCapture(XFile(file.url!));
-      }
+      debugPrint('Video stopped and file returned: ${file.path}');
+      widget.onCapture(file);
     } catch (e) {
       debugPrint('Error stopping video: $e');
     }

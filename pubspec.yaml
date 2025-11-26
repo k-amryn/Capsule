@@ -40,8 +40,14 @@ dependencies:
   file_selector: ^1.0.4
   path: ^1.9.1
   video_player: ^2.10.1
+  video_player_win: ^2.0.0
+  media_kit: ^1.1.10
+  media_kit_video: ^1.2.4
+  media_kit_libs_video: ^1.0.4
   window_manager: ^0.5.1
   camera: ^0.11.3
+  camera_windows: ^0.2.1
+  camera_linux: ^0.0.8
   record: ^6.1.2
   image_picker: ^1.0.4
   camera_macos: ^0.0.9

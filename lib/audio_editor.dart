@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:video_player/video_player.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'models/compression_settings.dart';
 import 'ffmpeg_service.dart';
@@ -35,8 +35,8 @@ class AudioEditor extends StatefulWidget {
 }
 
 class _AudioEditorState extends State<AudioEditor> {
-  VideoPlayerController? _originalController;
-  VideoPlayerController? _compressedController;
+  Player? _originalPlayer;
+  Player? _compressedPlayer;
 
   bool _isCompressing = false;
   bool _isPreviewing = false;
@@ -85,14 +85,14 @@ class _AudioEditorState extends State<AudioEditor> {
   void dispose() {
     _debounceTimer?.cancel();
     _currentPreviewTask?.cancel();
-    _originalController?.dispose();
-    _compressedController?.dispose();
+    _originalPlayer?.dispose();
+    _compressedPlayer?.dispose();
     super.dispose();
   }
 
   Future<void> _initializeAudio() async {
-    final controller = VideoPlayerController.file(File(widget.file.path));
-    await controller.initialize();
+    final player = Player();
+    await player.open(Media(widget.file.path), play: false);
 
     // Get media info to set max bitrate
     try {
@@ -110,9 +110,25 @@ class _AudioEditorState extends State<AudioEditor> {
 
     final size = await File(widget.file.path).length();
 
+    // Wait for duration to be available
+    Duration? duration = player.state.duration;
+    if (duration == Duration.zero) {
+      // If duration is not yet available, wait a bit or try to get it from ffmpeg info
+      // But usually open() should populate it.
+      // Let's rely on ffmpeg info if player doesn't have it yet, or wait for stream.
+    }
+    
+    // We already got info from ffmpeg above, let's use that if available
+    try {
+      final info = await _ffmpegService.getMediaInfo(widget.file.path);
+      if (info.duration != Duration.zero) {
+        duration = info.duration;
+      }
+    } catch (_) {}
+
     setState(() {
-      _originalController = controller;
-      _audioDuration = controller.value.duration;
+      _originalPlayer = player;
+      _audioDuration = duration ?? Duration.zero;
       _originalSize = _formatBytes(size);
     });
     // Generate initial preview at start
@@ -155,10 +171,10 @@ class _AudioEditorState extends State<AudioEditor> {
                 // Original
                 Expanded(
                   child: _AudioPanel(
-                    controller: _originalController,
+                    player: _originalPlayer,
                     label: 'Original',
                     color: Colors.blue.withValues(alpha: 0.1),
-                    onTap: () => _togglePlay(_originalController),
+                    onTap: () => _togglePlay(_originalPlayer),
                   ),
                 ),
                 // Divider
@@ -166,10 +182,10 @@ class _AudioEditorState extends State<AudioEditor> {
                 // Compressed
                 Expanded(
                   child: _AudioPanel(
-                    controller: _compressedController,
+                    player: _compressedPlayer,
                     label: 'Compressed',
                     color: Colors.orange.withValues(alpha: 0.1),
-                    onTap: () => _togglePlay(_compressedController),
+                    onTap: () => _togglePlay(_compressedPlayer),
                   ),
                 ),
               ],
@@ -242,29 +258,29 @@ class _AudioEditorState extends State<AudioEditor> {
     );
   }
 
-  void _togglePlay(VideoPlayerController? controller) {
-    if (controller == null || !controller.value.isInitialized) return;
+  void _togglePlay(Player? player) {
+    if (player == null) return;
 
-    final isPlaying = controller.value.isPlaying;
+    final isPlaying = player.state.playing;
     if (isPlaying) {
-      controller.pause();
-      controller.seekTo(Duration.zero);
+      player.pause();
+      player.seek(Duration.zero);
     } else {
-      // Pause other controller
-      if (controller == _originalController) {
-        _compressedController?.pause();
-        _compressedController?.seekTo(Duration.zero);
+      // Pause other player
+      if (player == _originalPlayer) {
+        _compressedPlayer?.pause();
+        _compressedPlayer?.seek(Duration.zero);
       } else {
-        _originalController?.pause();
-        _originalController?.seekTo(Duration.zero);
+        _originalPlayer?.pause();
+        _originalPlayer?.seek(Duration.zero);
       }
-      controller.seekTo(Duration.zero);
-      controller.play();
+      player.seek(Duration.zero);
+      player.play();
     }
   }
 
   Future<void> _generatePreview() async {
-    if (_originalController == null) return;
+    if (_originalPlayer == null) return;
 
     // Cancel previous task if running
     _currentPreviewTask?.cancel();
@@ -306,29 +322,27 @@ class _AudioEditorState extends State<AudioEditor> {
       await task.done;
 
       // 3. Update players
-      final oldOriginal = _originalController;
-      final oldCompressed = _compressedController;
+      final oldOriginal = _originalPlayer;
+      final oldCompressed = _compressedPlayer;
 
-      final newOriginal = VideoPlayerController.file(File(originalClipPath));
-      final newCompressed = VideoPlayerController.file(File(compressedClipPath));
+      final newOriginal = Player();
+      final newCompressed = Player();
 
-      await Future.wait([
-        newOriginal.initialize(),
-        newCompressed.initialize(),
-      ]);
+      await newOriginal.open(Media(originalClipPath), play: false);
+      await newCompressed.open(Media(compressedClipPath), play: false);
 
-      await newOriginal.setLooping(true);
-      await newCompressed.setLooping(true);
+      await newOriginal.setPlaylistMode(PlaylistMode.loop);
+      await newCompressed.setPlaylistMode(PlaylistMode.loop);
 
       if (mounted) {
         setState(() {
-          _originalController = newOriginal;
-          _compressedController = newCompressed;
+          _originalPlayer = newOriginal;
+          _compressedPlayer = newCompressed;
           _isPreviewing = false;
         });
       }
 
-      // Dispose old controllers
+      // Dispose old players
       oldOriginal?.dispose();
       oldCompressed?.dispose();
 
@@ -449,13 +463,13 @@ class _AudioEditorState extends State<AudioEditor> {
 }
 
 class _AudioPanel extends StatefulWidget {
-  final VideoPlayerController? controller;
+  final Player? player;
   final String label;
   final Color color;
   final VoidCallback onTap;
 
   const _AudioPanel({
-    required this.controller,
+    required this.player,
     required this.label,
     required this.color,
     required this.onTap,
@@ -487,14 +501,14 @@ class _AudioPanelState extends State<_AudioPanel> {
   }
 
   Widget _buildPlayButton() {
-    if (widget.controller == null || !widget.controller!.value.isInitialized) {
+    if (widget.player == null) {
       return const CircularProgressIndicator();
     }
 
-    return ValueListenableBuilder(
-      valueListenable: widget.controller!,
-      builder: (context, VideoPlayerValue value, child) {
-        final isPlaying = value.isPlaying;
+    return StreamBuilder<bool>(
+      stream: widget.player!.stream.playing,
+      builder: (context, snapshot) {
+        final isPlaying = snapshot.data ?? false;
         // Highlight if hovering OR playing
         final isHighlighted = _isHovering || isPlaying;
         

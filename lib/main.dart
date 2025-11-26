@@ -6,6 +6,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:path/path.dart' as p;
 import 'package:window_manager/window_manager.dart';
 
@@ -14,9 +15,11 @@ import 'views/audio_record_view.dart';
 import 'views/batch_view.dart';
 import 'views/camera_view.dart';
 import 'views/compress_view.dart';
+import 'widgets/window_buttons.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
   
   if (!Platform.isAndroid && !Platform.isIOS) {
     await windowManager.ensureInitialized();
@@ -227,14 +230,39 @@ class _MyHomePageState extends State<MyHomePage> {
             top: 0,
             left: 0,
             right: 0,
-            height: 28,
-            child: GestureDetector(
-              onPanStart: (details) {
-                windowManager.startDragging();
+            height: 32,
+            child: Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onPanStart: (details) {
+                      windowManager.startDragging();
+                    },
+                    child: Container(
+                      color: Colors.transparent,
+                    ),
+                  ),
+                ),
+                if (Platform.isWindows || Platform.isLinux)
+                  const WindowButtons(),
+              ],
+            ),
+          ),
+
+        // Global Close Button for Camera/Audio modes
+        if (_appMode == AppMode.camera || _appMode == AppMode.audio)
+          Positioned(
+            top: 10,
+            left: (Platform.isWindows || Platform.isLinux) ? 10 : null,
+            right: (Platform.isWindows || Platform.isLinux) ? null : 10,
+            child: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white),
+              onPressed: () {
+                setState(() {
+                  _appMode = AppMode.home;
+                });
               },
-              child: Container(
-                color: Colors.transparent,
-              ),
+              tooltip: 'Close',
             ),
           ),
       ],
@@ -381,11 +409,6 @@ class _MyHomePageState extends State<MyHomePage> {
               _appMode = AppMode.compress;
             });
           },
-          onClose: () {
-            setState(() {
-              _appMode = AppMode.home;
-            });
-          },
         );
       case AppMode.audio:
         return AudioRecordView(
@@ -394,11 +417,6 @@ class _MyHomePageState extends State<MyHomePage> {
               _capturedFile = file;
               _capturedMediaType = ffmpeg.MediaType.audio;
               _appMode = AppMode.compress;
-            });
-          },
-          onClose: () {
-            setState(() {
-              _appMode = AppMode.home;
             });
           },
         );

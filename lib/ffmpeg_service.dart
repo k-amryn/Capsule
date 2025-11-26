@@ -15,7 +15,10 @@ class MediaInfo {
   final Duration duration;
   final int bitrate; // kbps
 
-  MediaInfo({required this.duration, required this.bitrate});
+  final int width;
+  final int height;
+
+  MediaInfo({required this.duration, required this.bitrate, this.width = 0, this.height = 0});
 }
 
 class ProbeResult {
@@ -144,7 +147,22 @@ class MobileFfmpegService implements FfmpegService {
       bitrate = (bitrate / 1000).round();
     }
 
-    return MediaInfo(duration: duration, bitrate: bitrate);
+    // Parse Width and Height
+    // Stream #0:0(und): Video: h264 (High) (avc1 / 0x31637661), yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], 21640 kb/s, 29.97 fps, 29.97 tbr, 30k tbn, 59.94 tbc (default)
+    // We need to find the video stream line.
+    // FFprobeKit info object has getStreams().
+    final streams = info.getStreams();
+    int width = 0;
+    int height = 0;
+    for (final stream in streams) {
+      if (stream.getType() == 'video') {
+        width = stream.getWidth() ?? 0;
+        height = stream.getHeight() ?? 0;
+        break; // Use first video stream
+      }
+    }
+
+    return MediaInfo(duration: duration, bitrate: bitrate, width: width, height: height);
   }
 
   @override
@@ -366,7 +384,19 @@ class DesktopFfmpegService implements FfmpegService {
       bitrate = int.parse(bitrateMatch.group(1)!);
     }
 
-    return MediaInfo(duration: duration, bitrate: bitrate);
+    // Parse Width and Height
+    // Stream #0:0(und): Video: h264 (High) (avc1 / 0x31637661), yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], ...
+    // Regex for resolution: , (\d+)x(\d+)
+    final resolutionRegex = RegExp(r', (\d+)x(\d+)');
+    final resolutionMatch = resolutionRegex.firstMatch(output);
+    int width = 0;
+    int height = 0;
+    if (resolutionMatch != null) {
+      width = int.parse(resolutionMatch.group(1)!);
+      height = int.parse(resolutionMatch.group(2)!);
+    }
+
+    return MediaInfo(duration: duration, bitrate: bitrate, width: width, height: height);
   }
 
   @override

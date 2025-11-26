@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:cross_file/cross_file.dart';
 import 'package:flutter/material.dart';
@@ -7,12 +8,10 @@ import 'package:record/record.dart';
 
 class AudioRecordView extends StatefulWidget {
   final ValueChanged<XFile> onCapture;
-  final VoidCallback onClose;
 
   const AudioRecordView({
     super.key,
     required this.onCapture,
-    required this.onClose,
   });
 
   @override
@@ -157,16 +156,6 @@ class _AudioRecordViewState extends State<AudioRecordView> {
           ),
         ),
 
-        // Close Button
-        Positioned(
-          top: 10,
-          right: 10,
-          child: IconButton(
-            icon: const Icon(Icons.close, color: Colors.white),
-            onPressed: widget.onClose,
-            tooltip: 'Close Audio Recorder',
-          ),
-        ),
       ],
     );
   }

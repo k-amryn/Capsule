@@ -4,8 +4,10 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:video_player/video_player.dart';
+import 'package:path/path.dart' as p;
 
 import 'ffmpeg_service.dart';
 import 'models/compression_settings.dart';
@@ -37,22 +39,29 @@ class VideoEditor extends StatefulWidget {
 }
 
 class _VideoEditorState extends State<VideoEditor> {
-  VideoPlayerController? _fullOriginalController;
-  VideoPlayerController? _activeOriginalController;
-  VideoPlayerController? _compressedController;
+  // Single composite player for synchronized before/after preview
+  // The composite video has original on left half, compressed on right half
+  late final Player _compositePlayer;
+  late final VideoController _compositeController;
   
+  // Transform controller for pan/zoom - persists across preview regenerations
+  final TransformationController _transformController = TransformationController();
+
   bool _isCompressing = false;
   bool _isPreviewing = false;
-  bool _isRemuxing = false;
+  bool _isCompositeReady = false;
   double _bitrate = 5000; // kbps
   double _maxBitrate = 10000; // kbps
   String _outputFormat = 'av1'; // av1 or vp9
-  double _scrubPosition = 0.0; // 0.0 to 1.0
+  final ValueNotifier<double> _scrubPosition = ValueNotifier(0.0); // 0.0 to 1.0
   Duration _videoDuration = Duration.zero;
   double _progress = 0.0;
   bool _hasAv1Hardware = false;
   String? _originalSize;
   double _resolution = 1.0; // 1.0, 0.5, 0.25
+  double? _aspectRatio;
+  int _originalWidth = 0;
+  int _originalHeight = 0;
   
   late FfmpegService _ffmpegService;
   
@@ -65,7 +74,16 @@ class _VideoEditorState extends State<VideoEditor> {
     super.initState();
     _ffmpegService = FfmpegServiceFactory.create();
     _ffmpegService.init();
+
+    // Initialize single composite player
+    _compositePlayer = Player();
+    _compositeController = VideoController(_compositePlayer);
+
+    // Mute audio as requested
+    _compositePlayer.setVolume(0);
+
     _initializeVideo();
+    
     if (widget.settings != null) {
       _outputFormat = widget.settings!.outputFormat;
       _bitrate = widget.settings!.bitrate;
@@ -93,20 +111,15 @@ class _VideoEditorState extends State<VideoEditor> {
   void dispose() {
     _debounceTimer?.cancel();
     _currentPreviewTask?.cancel();
-    _fullOriginalController?.dispose();
-    if (_activeOriginalController != _fullOriginalController) {
-      _activeOriginalController?.dispose();
-    }
-    _compressedController?.dispose();
+    
+    _compositePlayer.dispose();
+    _transformController.dispose();
+    _scrubPosition.dispose();
+    
     super.dispose();
   }
 
   Future<void> _initializeVideo() async {
-    // Dispose previous controllers to free resources
-    _fullOriginalController?.dispose();
-    _fullOriginalController = null;
-    _activeOriginalController = null;
-    
     try {
       debugPrint('Initializing video: ${widget.file.path}');
       final file = File(widget.file.path);
@@ -114,8 +127,7 @@ class _VideoEditorState extends State<VideoEditor> {
         throw Exception('File does not exist');
       }
 
-      // 1. Get file size and media info BEFORE initializing player
-      // This avoids concurrent access issues on external drives
+      // 1. Get file size and media info
       int size = 0;
       try {
         size = await file.length();
@@ -130,56 +142,32 @@ class _VideoEditorState extends State<VideoEditor> {
         debugPrint('Error checking encoders: $e');
       }
 
-      // Get media info to set max bitrate
+      // Get media info to set max bitrate and aspect ratio
       try {
         final info = await _ffmpegService.getMediaInfo(widget.file.path);
         if (info.bitrate > 0) {
           setState(() {
             _maxBitrate = info.bitrate.toDouble();
-            // Set default bitrate to 50% of original or 5000, whichever is lower
             _bitrate = (_maxBitrate * 0.5).clamp(10.0, 5000.0);
+          });
+        }
+        if (info.width > 0 && info.height > 0) {
+          setState(() {
+            _aspectRatio = info.width / info.height;
+            _videoDuration = info.duration;
+            _originalWidth = info.width;
+            _originalHeight = info.height;
           });
         }
       } catch (e) {
         debugPrint('Error getting media info: $e');
       }
 
-      // 2. Initialize VideoPlayer
-      VideoPlayerController controller = VideoPlayerController.file(file);
-      try {
-        await controller.initialize();
-      } catch (e) {
-        debugPrint('Native initialization failed: $e');
-        // If native initialization fails, try to recover (Symlink or Remux)
-        // This handles renamed files (MP4 named as MKV) and incompatible containers (Real MKV, AVI)
-        // Error 12847: Format not supported
-        // Error 12848: Media damaged (often returned for incompatible containers like AVI)
-        final errorStr = e.toString();
-        if (errorStr.contains('not supported') ||
-            errorStr.contains('damaged') ||
-            errorStr.contains('12847') ||
-            errorStr.contains('12848')) {
-           await _recoverAndInitialize(file);
-           return;
-        }
-        rethrow;
-      }
-      
-      if (!mounted) {
-        controller.dispose();
-        return;
-      }
-
       setState(() {
-        _fullOriginalController = controller;
-        _activeOriginalController = controller;
-        _videoDuration = controller.value.duration;
         _originalSize = _formatBytes(size);
       });
       
-      // 3. Generate initial preview
-      // Add a small delay to let AVPlayer settle
-      await Future.delayed(const Duration(milliseconds: 200));
+      // 2. Generate initial preview
       _generatePreview();
     } catch (e) {
       debugPrint('Error initializing video: $e');
@@ -188,122 +176,17 @@ class _VideoEditorState extends State<VideoEditor> {
           SnackBar(content: Text('Error loading video: $e')),
         );
       }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isRemuxing = false;
-        });
-      }
     }
-  }
-
-  Future<void> _recoverAndInitialize(File originalFile) async {
-    setState(() {
-      _isRemuxing = true;
-    });
-
-    try {
-      final tempDir = await getTemporaryDirectory();
-      
-      // Strategy 1: Try Symlink with .mp4 extension (Zero Copy)
-      // This fixes cases where the file is actually MP4 but has wrong extension (e.g. .mkv)
-      final symlinkPath = '${tempDir.path}/preview_symlink.mp4';
-      final symlinkFile = File(symlinkPath);
-      if (await symlinkFile.exists()) {
-        await symlinkFile.delete();
-      }
-      
-      try {
-        debugPrint('Attempting symlink recovery...');
-        final link = Link(symlinkPath);
-        await link.create(originalFile.path);
-        
-        final controller = VideoPlayerController.file(File(symlinkPath));
-        await controller.initialize();
-        
-        // If we got here, symlink worked!
-        debugPrint('Symlink recovery successful!');
-        await _applyController(controller, originalFile);
-        return;
-      } catch (e) {
-        debugPrint('Symlink recovery failed: $e');
-        // Fallthrough to remux
-      }
-
-      // Strategy 2: Remux to MP4 (Fast Copy)
-      // This handles incompatible containers (Real MKV) by copying streams to MP4
-      final remuxPath = '${tempDir.path}/preview_remux.mp4';
-      debugPrint('Remuxing to $remuxPath for preview...');
-      
-      try {
-        await _ffmpegService.execute(
-          '-y -i "${originalFile.path}" -c copy -movflags +faststart "$remuxPath"'
-        ).then((t) => t.done);
-      } catch (e) {
-        debugPrint('Simple remux failed, trying with AAC audio: $e');
-        try {
-          await _ffmpegService.execute(
-            '-y -i "${originalFile.path}" -c:v copy -c:a aac -movflags +faststart "$remuxPath"'
-          ).then((t) => t.done);
-        } catch (e2) {
-          debugPrint('Remux with AAC failed, falling back to transcoding (slow): $e2');
-          // Strategy 3: Transcode to H.264 (Slow but compatible)
-          // This handles incompatible codecs (WMV3, etc.) that cannot be put in MP4
-          // Use ultrafast preset to minimize wait time
-          await _ffmpegService.execute(
-            '-y -i "${originalFile.path}" -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart "$remuxPath"'
-          ).then((t) => t.done);
-        }
-      }
-
-      final controller = VideoPlayerController.file(File(remuxPath));
-      await controller.initialize();
-      await _applyController(controller, originalFile);
-
-    } catch (e) {
-      debugPrint('Recovery failed: $e');
-      throw Exception('Could not prepare video for preview: $e');
-    }
-  }
-
-  Future<void> _applyController(VideoPlayerController controller, File originalFile) async {
-    if (!mounted) {
-      controller.dispose();
-      return;
-    }
-
-    setState(() {
-      _fullOriginalController = controller;
-      _activeOriginalController = controller;
-      _videoDuration = controller.value.duration;
-    });
-    
-    // Get original size if not set
-    if (_originalSize == null) {
-       try {
-         final size = await originalFile.length();
-         setState(() {
-           _originalSize = _formatBytes(size);
-         });
-       } catch (_) {}
-    }
-
-    await Future.delayed(const Duration(milliseconds: 200));
-    _generatePreview();
   }
 
   void _onScrubChanged(double value) {
-    setState(() {
-      _scrubPosition = value;
-      // Switch back to full original controller for scrubbing
-      if (_fullOriginalController != null) {
-        _activeOriginalController = _fullOriginalController;
-        final target = _videoDuration * value;
-        _fullOriginalController!.seekTo(target);
-        // Pause compressed preview or hide it while scrubbing
-        // _compressedController = null; // Optional: hide compressed while scrubbing
-      }
-    });
+    _scrubPosition.value = value;
+    // Clear composite preview while scrubbing
+    if (_isCompositeReady) {
+      setState(() {
+        _isCompositeReady = false;
+      });
+    }
     _debouncePreview();
   }
 
@@ -327,39 +210,31 @@ class _VideoEditorState extends State<VideoEditor> {
 
     return Stack(
       children: [
-        // Layer 1: Video Viewer
+        // Layer 1: Composite Video Viewer (synchronized before/after)
         Positioned.fill(
           child: Container(
             color: Colors.transparent,
-            child: _isRemuxing
+            child: _isPreviewing && !_isCompositeReady
                 ? const Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         CircularProgressIndicator(),
                         SizedBox(height: 16),
-                        Text('Preparing preview...', style: TextStyle(color: Colors.white)),
+                        Text('Generating preview...', style: TextStyle(color: Colors.white)),
                       ],
                     ),
                   )
-                : _activeOriginalController != null && _activeOriginalController!.value.isInitialized
-                    ? BeforeAfter(
-                        original: Center(
-                          child: AspectRatio(
-                            aspectRatio: _activeOriginalController!.value.aspectRatio,
-                            child: VideoPlayer(_activeOriginalController!),
-                          ),
-                        ),
-                        compressed: _compressedController != null && _compressedController!.value.isInitialized
-                            ? Center(
-                                child: AspectRatio(
-                                  aspectRatio: _compressedController!.value.aspectRatio,
-                                  child: VideoPlayer(_compressedController!),
-                                ),
-                              )
-                            : null,
+                : _aspectRatio != null
+                    ? BeforeAfterComposite(
+                        controller: _compositeController,
+                        aspectRatio: _aspectRatio!,
+                        isReady: _isCompositeReady,
+                        transformController: _transformController,
                       )
-                    : const Center(child: CircularProgressIndicator()),
+                    : const Center(
+                        child: Text('Loading video...', style: TextStyle(color: Colors.white)),
+                      ),
           ),
         ),
 
@@ -368,78 +243,86 @@ class _VideoEditorState extends State<VideoEditor> {
           left: isNarrow ? 20 : null,
           right: 20,
           bottom: 20,
-          child: MediaControls(
-            width: isNarrow ? double.infinity : 350,
-            scrubPosition: _scrubPosition,
-            duration: _videoDuration,
-            outputFormat: _outputFormat,
-            bitrate: _bitrate,
-            maxBitrate: _maxBitrate,
-            isCompressing: _isCompressing || widget.batchProgress != null,
-            isPreviewing: _isPreviewing,
-            progress: widget.batchProgress ?? _progress,
-            progressLabel: widget.progressLabel,
-            originalSize: _originalSize,
-            estimatedSize: _estimateSize(),
-            hasAv1Hardware: _hasAv1Hardware,
-            resolution: _resolution,
-            onScrubChanged: _onScrubChanged,
-            onScrubEnd: (value) {
-              _debounceTimer?.cancel();
-              _generatePreview();
+          child: ValueListenableBuilder<double>(
+            valueListenable: _scrubPosition,
+            builder: (context, scrubPos, _) {
+              return MediaControls(
+                width: isNarrow ? double.infinity : 350,
+                scrubPosition: scrubPos,
+                duration: _videoDuration,
+                outputFormat: _outputFormat,
+                bitrate: _bitrate,
+                maxBitrate: _maxBitrate,
+                isCompressing: _isCompressing || widget.batchProgress != null,
+                isPreviewing: _isPreviewing,
+                progress: widget.batchProgress ?? _progress,
+                progressLabel: widget.progressLabel,
+                originalSize: _originalSize,
+                estimatedSize: _estimateSize(),
+                hasAv1Hardware: _hasAv1Hardware,
+                resolution: _resolution,
+                onScrubChanged: _onScrubChanged,
+                onScrubEnd: (value) {
+                  _debounceTimer?.cancel();
+                  _generatePreview();
+                },
+                onFormatChanged: (newValue) {
+                  if (newValue != null) {
+                    setState(() {
+                      _outputFormat = newValue;
+                    });
+                    if (widget.onSettingsChanged != null) {
+                      widget.onSettingsChanged!(VideoSettings(
+                        outputFormat: _outputFormat,
+                        bitrate: _bitrate,
+                        resolution: _resolution,
+                      ));
+                    }
+                    _generatePreview();
+                  }
+                },
+                onResolutionChanged: (newValue) {
+                  if (newValue != null) {
+                    setState(() {
+                      _resolution = newValue;
+                    });
+                    if (widget.onSettingsChanged != null) {
+                      widget.onSettingsChanged!(VideoSettings(
+                        outputFormat: _outputFormat,
+                        bitrate: _bitrate,
+                        resolution: _resolution,
+                      ));
+                    }
+                    _generatePreview();
+                  }
+                },
+                originalResolution: Size(
+                  _originalWidth.toDouble(),
+                  _originalHeight.toDouble(),
+                ),
+                onBitrateChanged: _onBitrateChanged,
+                onBitrateEnd: (value) {
+                  _debounceTimer?.cancel();
+                  if (widget.onSettingsChanged != null) {
+                    widget.onSettingsChanged!(VideoSettings(
+                      outputFormat: _outputFormat,
+                      bitrate: _bitrate,
+                      resolution: _resolution,
+                    ));
+                  }
+                  _generatePreview();
+                },
+                onClear: widget.onClear,
+                onSave: widget.onSaveBatch ?? _saveVideo,
+                formatItems: [
+                  DropdownMenuItem(
+                    value: 'av1',
+                    child: Text('AV1 (MP4)${_hasAv1Hardware ? " [HW]" : ""}'),
+                  ),
+                  const DropdownMenuItem(value: 'vp9', child: Text('VP9 (WebM)')),
+                ],
+              );
             },
-            onFormatChanged: (newValue) {
-              if (newValue != null) {
-                setState(() {
-                  _outputFormat = newValue;
-                });
-                if (widget.onSettingsChanged != null) {
-                  widget.onSettingsChanged!(VideoSettings(
-                    outputFormat: _outputFormat,
-                    bitrate: _bitrate,
-                    resolution: _resolution,
-                  ));
-                }
-                _generatePreview();
-              }
-            },
-            onResolutionChanged: (newValue) {
-              if (newValue != null) {
-                setState(() {
-                  _resolution = newValue;
-                });
-                if (widget.onSettingsChanged != null) {
-                  widget.onSettingsChanged!(VideoSettings(
-                    outputFormat: _outputFormat,
-                    bitrate: _bitrate,
-                    resolution: _resolution,
-                  ));
-                }
-                _generatePreview();
-              }
-            },
-            originalResolution: _fullOriginalController?.value.size,
-            onBitrateChanged: _onBitrateChanged,
-            onBitrateEnd: (value) {
-              _debounceTimer?.cancel();
-              if (widget.onSettingsChanged != null) {
-                widget.onSettingsChanged!(VideoSettings(
-                  outputFormat: _outputFormat,
-                  bitrate: _bitrate,
-                  resolution: _resolution,
-                ));
-              }
-              _generatePreview();
-            },
-            onClear: widget.onClear,
-            onSave: widget.onSaveBatch ?? _saveVideo,
-            formatItems: [
-              DropdownMenuItem(
-                value: 'av1',
-                child: Text('AV1 (MP4)${_hasAv1Hardware ? " [HW]" : ""}'),
-              ),
-              const DropdownMenuItem(value: 'vp9', child: Text('VP9 (WebM)')),
-            ],
           ),
         ),
       ],
@@ -447,108 +330,87 @@ class _VideoEditorState extends State<VideoEditor> {
   }
 
   Future<void> _generatePreview() async {
-    if (_fullOriginalController == null) return;
-    
     // Cancel previous task if running
     _currentPreviewTask?.cancel();
     
     setState(() {
       _isPreviewing = true;
+      _isCompositeReady = false;
     });
 
     try {
       final tempDir = await getTemporaryDirectory();
-      final originalClipPath = '${tempDir.path}/preview_original.mp4';
-      // Always use .mp4 for playback compatibility on macOS
-      final compressedClipPath = '${tempDir.path}/preview_compressed.mp4';
-      final tempVp9Path = '${tempDir.path}/temp_vp9.webm';
+      
+      // Use unique filenames to avoid lock issues
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final originalClipPath = p.join(tempDir.path, 'preview_original_$timestamp.mp4');
+      final compressedClipPath = p.join(tempDir.path, 'preview_compressed_$timestamp.mp4');
+      final compositePath = p.join(tempDir.path, 'preview_composite_$timestamp.mp4');
+      final tempVp9Path = p.join(tempDir.path, 'temp_vp9_$timestamp.webm');
       
       // Calculate start time
-      final startTime = _videoDuration.inMilliseconds * _scrubPosition / 1000.0;
+      final startTime = _videoDuration.inMilliseconds * _scrubPosition.value / 1000.0;
       final startTimeStr = startTime.toStringAsFixed(3);
 
-      // 1. Extract original clip (2s)
-      // Re-encode to ensure exact timing and sync with compressed clip
-      // Use ultrafast preset for speed
-      await _ffmpegService.execute(
-        '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -c:v libx264 -preset ultrafast -an "$originalClipPath"'
-      ).then((task) => task.done);
-
-      // 2. Compress clip (2s)
+      // Determine codec and settings
       String codec;
       String speed = '';
       
       if (_outputFormat == 'av1') {
         if (_hasAv1Hardware) {
           codec = 'av1_videotoolbox';
-          // VideoToolbox doesn't use -cpu-used
         } else {
           codec = 'libaom-av1';
           speed = '-cpu-used 8'; // Fastest for preview
         }
       } else {
         codec = 'libvpx-vp9';
-        // -speed is deprecated for VP9 in newer ffmpeg, use -cpu-used
-        // 5-8 is realtime.
         speed = '-cpu-used 5';
       }
       
       debugPrint('Generating preview with codec: $codec');
       
-      // Use lower resolution for preview on mobile to avoid OOM/Crash
-      // Also apply user selected resolution scaling
-      String scaleFilter;
-      if (Platform.isAndroid || Platform.isIOS) {
-        scaleFilter = 'scale=trunc(iw*$_resolution/2)*2:480'; // Force 480p height but scale width? No, that's conflicting.
-        // Mobile preview is fixed height 480 usually.
-        // If user wants 50%, we should probably respect that relative to original?
-        // But for preview, we just want it to be fast.
-        // Let's just stick to the fixed preview size for mobile to be safe,
-        // OR apply the resolution factor to the preview size.
-        // Let's apply the resolution factor to the base preview size.
-        // Actually, for preview, we should probably just show what it looks like.
-        // But resizing for preview might be slow if we do complex scaling.
-        // Let's just use the user's resolution selection for the output,
-        // and for preview, we try to match it if possible, or just use a reasonable preview size.
-        
-        // If user selects 50%, we should scale the input by 0.5.
-        // But we also have the mobile preview constraint.
-        // Let's just use the user's resolution.
-        scaleFilter = 'scale=trunc(iw*$_resolution/2)*2:trunc(ih*$_resolution/2)*2';
+      final scaleFilter = 'scale=trunc(iw*$_resolution/2)*2:trunc(ih*$_resolution/2)*2';
+
+      // Step 1 & 2: Generate original and compressed clips in PARALLEL
+      final originalFuture = _ffmpegService.execute(
+        '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -c:v libx264 -preset ultrafast -crf 18 -an "$originalClipPath"'
+      ).then((task) => task.done);
+
+      Future<void> compressedFuture;
+      
+      if (_outputFormat == 'vp9') {
+        // For VP9: First compress to VP9 (to generate artifacts), then transcode to H.264
+        compressedFuture = _ffmpegService.execute(
+          '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 -an "$tempVp9Path"'
+        ).then((task) {
+          _currentPreviewTask = task;
+          return task.done;
+        }).then((_) => _ffmpegService.execute(
+          '-y -i "$tempVp9Path" -c:v libx264 -preset ultrafast -crf 18 -threads 0 -an "$compressedClipPath"'
+        )).then((task) {
+          _currentPreviewTask = task;
+          return task.done;
+        });
       } else {
-        // Desktop
-        scaleFilter = 'scale=trunc(iw*$_resolution/2)*2:trunc(ih*$_resolution/2)*2';
+        // AV1 (or others) - direct compression to MP4
+        compressedFuture = _ffmpegService.execute(
+          '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 -an "$compressedClipPath"'
+        ).then((task) {
+          _currentPreviewTask = task;
+          return task.done;
+        });
       }
 
+      // Wait for both clips to be generated
       try {
-        if (_outputFormat == 'vp9') {
-          // 1. Compress to VP9 (to generate artifacts)
-          final vp9Task = await _ffmpegService.execute(
-            '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 -an "$tempVp9Path"'
-          );
-          _currentPreviewTask = vp9Task;
-          await vp9Task.done;
-
-          // 2. Transcode to H.264 for playback
-          final transcodeTask = await _ffmpegService.execute(
-            '-y -i "$tempVp9Path" -c:v libx264 -preset ultrafast -threads 0 -an "$compressedClipPath"'
-          );
-          _currentPreviewTask = transcodeTask;
-          await transcodeTask.done;
-        } else {
-          // AV1 (or others) - direct compression to MP4
-          final task = await _ffmpegService.execute(
-            '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 -an "$compressedClipPath"'
-          );
-          _currentPreviewTask = task;
-          await task.done;
-        }
+        await Future.wait([originalFuture, compressedFuture]);
       } catch (e) {
         debugPrint('Preview generation failed with $codec: $e');
-        // Fallback to H.264 if VP9/AV1 fails, just to show something
+        // Fallback to H.264 if VP9/AV1 fails
         if (_outputFormat == 'vp9' || _outputFormat == 'av1') {
-           debugPrint('Falling back to H.264 for preview');
-           final fallbackTask = await _ffmpegService.execute(
+          debugPrint('Falling back to H.264 for preview');
+          final fallbackTask = await _ffmpegService.execute(
             '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v libx264 -preset ultrafast -b:v ${_bitrate.round()}k -an "$compressedClipPath"'
           );
           _currentPreviewTask = fallbackTask;
@@ -558,38 +420,28 @@ class _VideoEditorState extends State<VideoEditor> {
         }
       }
 
-      // 3. Update players
-      final oldOriginal = _activeOriginalController;
-      final oldCompressed = _compressedController;
+      // Step 3: Create composite video using FFmpeg hstack filter
+      // This combines original (left) and compressed (right) into a single video
+      // Using -crf 18 for high quality to preserve visible compression artifacts
+      final compositeTask = await _ffmpegService.execute(
+        '-y -i "$originalClipPath" -i "$compressedClipPath" '
+        '-filter_complex "[0:v]setpts=PTS-STARTPTS[a];[1:v]setpts=PTS-STARTPTS[b];[a][b]hstack=inputs=2[v]" '
+        '-map "[v]" -c:v libx264 -preset ultrafast -crf 18 -an "$compositePath"'
+      );
+      _currentPreviewTask = compositeTask;
+      await compositeTask.done;
 
-      final newOriginal = VideoPlayerController.file(File(originalClipPath));
-      final newCompressed = VideoPlayerController.file(File(compressedClipPath));
-
-      await Future.wait([
-        newOriginal.initialize(),
-        newCompressed.initialize(),
-      ]);
-
-      await newOriginal.setLooping(true);
-      await newCompressed.setLooping(true);
-      
-      // Sync play
-      await newOriginal.play();
-      await newCompressed.play();
+      // Step 4: Open composite video in player
+      await _compositePlayer.open(Media(compositePath));
+      await _compositePlayer.setPlaylistMode(PlaylistMode.loop);
+      await _compositePlayer.play();
 
       if (mounted) {
         setState(() {
-          _activeOriginalController = newOriginal;
-          _compressedController = newCompressed;
           _isPreviewing = false;
+          _isCompositeReady = true;
         });
       }
-
-      // Dispose old controllers (only if they are not the full original)
-      if (oldOriginal != _fullOriginalController) {
-        oldOriginal?.dispose();
-      }
-      oldCompressed?.dispose();
 
     } catch (e) {
       if (e.toString().contains('cancelled')) {
@@ -600,6 +452,7 @@ class _VideoEditorState extends State<VideoEditor> {
       if (mounted) {
         setState(() {
           _isPreviewing = false;
+          _isCompositeReady = false;
         });
       }
     }
