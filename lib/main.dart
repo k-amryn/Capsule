@@ -486,9 +486,11 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Drag and drop media here',
-              style: TextStyle(
+            Text(
+              (Platform.isAndroid || Platform.isIOS)
+                  ? 'Compress any media file'
+                  : 'Drag and drop media here',
+              style: const TextStyle(
                 color: Colors.white54,
                 fontSize: 16,
                 fontWeight: FontWeight.w300,
