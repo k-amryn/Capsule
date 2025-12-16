@@ -80,12 +80,44 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _dragging = false;
   bool _isProbing = false;
   late ffmpeg.FfmpegService _ffmpegService;
+  bool _ffmpegAvailable = true;
+  String? _linuxDistro;
 
   @override
   void initState() {
     super.initState();
     _ffmpegService = ffmpeg.FfmpegServiceFactory.create();
-    _ffmpegService.init();
+    _checkFfmpeg();
+  }
+
+  Future<void> _checkFfmpeg() async {
+    await _ffmpegService.init();
+    final available = await _ffmpegService.isAvailable();
+    setState(() {
+      _ffmpegAvailable = available;
+    });
+    
+    if (!available && Platform.isLinux) {
+      _detectLinuxDistro();
+    }
+  }
+
+  Future<void> _detectLinuxDistro() async {
+    try {
+      final file = File('/etc/os-release');
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        if (content.contains('ID=ubuntu') || content.contains('ID=debian') || content.contains('ID_LIKE=ubuntu') || content.contains('ID_LIKE=debian')) {
+           setState(() => _linuxDistro = 'debian');
+        } else if (content.contains('ID=fedora') || content.contains('ID=rhel') || content.contains('ID=centos')) {
+           setState(() => _linuxDistro = 'redhat');
+        } else if (content.contains('ID=arch') || content.contains('ID_LIKE=arch')) {
+           setState(() => _linuxDistro = 'arch');
+        }
+      }
+    } catch (e) {
+      debugPrint('Error detecting distro: $e');
+    }
   }
 
   Future<void> _handleFile(XFile file) async {
@@ -486,6 +518,8 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
             ),
             const SizedBox(height: 8),
+            if (!_ffmpegAvailable)
+              _buildFfmpegMissingWarning(),
             Text(
               (Platform.isAndroid || Platform.isIOS)
                   ? 'Compress any media file'
@@ -533,6 +567,42 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildFfmpegMissingWarning() {
+    String command = 'ffmpeg';
+    if (Platform.isWindows) {
+      command = 'winget install ffmpeg';
+    } else if (Platform.isLinux) {
+      if (_linuxDistro == 'debian') {
+        command = 'sudo apt install ffmpeg';
+      } else if (_linuxDistro == 'redhat') {
+        command = 'sudo dnf install ffmpeg';
+      } else if (_linuxDistro == 'arch') {
+        command = 'sudo pacman -S ffmpeg';
+      } else {
+        command = 'Install ffmpeg via your package manager';
+      }
+    } else if (Platform.isMacOS) {
+       command = 'brew install ffmpeg';
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.amber.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.amber),
+      ),
+      child: Column(
+        children: [
+          const Text('FFmpeg not detected', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          SelectableText(command, style: const TextStyle(fontFamily: 'monospace', color: Colors.white)),
+        ],
       ),
     );
   }

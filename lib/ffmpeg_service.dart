@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
-import 'package:ffmpeg_kit_flutter_new/return_code.dart';
+import 'package:ffmpeg_kit_flutter_new_full/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_full/ffprobe_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_full/return_code.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -42,6 +42,7 @@ abstract class FfmpegService {
   Future<bool> hasEncoder(String encoderName);
   Future<bool> hasPixelFormat(String encoderName, String pixelFormat);
   Future<bool> isUsingSystemFfmpeg();
+  Future<bool> isAvailable();
   Future<void> init();
 }
 
@@ -49,6 +50,8 @@ class FfmpegServiceFactory {
   static FfmpegService create() {
     if (Platform.isAndroid || Platform.isIOS) {
       return MobileFfmpegService();
+    } else if (Platform.isMacOS) {
+      return MacosHybridFfmpegService();
     } else {
       return DesktopFfmpegService();
     }
@@ -64,6 +67,11 @@ class MobileFfmpegService implements FfmpegService {
   @override
   Future<bool> isUsingSystemFfmpeg() async {
     return false;
+  }
+
+  @override
+  Future<bool> isAvailable() async {
+    return true;
   }
 
   @override
@@ -259,6 +267,14 @@ class DesktopFfmpegService implements FfmpegService {
   }
 
   @override
+  Future<bool> isAvailable() async {
+    if (_binaryPath == null) {
+      await init();
+    }
+    return _binaryPath != null;
+  }
+
+  @override
   Future<void> init() async {
     if (_binaryPath != null) return;
 
@@ -282,43 +298,17 @@ class DesktopFfmpegService implements FfmpegService {
       debugPrint('Error checking for system ffmpeg: $e');
     }
 
-    // Fallback to bundled ffmpeg
-    _isSystemFfmpeg = false;
-    debugPrint('System FFmpeg not found, using bundled binary');
-    
-    final appDir = await getApplicationSupportDirectory();
-    final binDir = Directory(p.join(appDir.path, 'bin'));
-    if (!await binDir.exists()) {
-      await binDir.create(recursive: true);
-    }
-
-    String binaryName = 'ffmpeg';
-    if (Platform.isWindows) {
-      binaryName = 'ffmpeg.exe';
-    }
-
-    final binaryFile = File(p.join(binDir.path, binaryName));
-
-    // Always copy for now to ensure we have the latest asset
-    // In production, might want to check version or existence
-    final byteData = await rootBundle.load('assets/bin/$binaryName');
-    final buffer = byteData.buffer;
-    await binaryFile.writeAsBytes(
-      buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes),
-    );
-
-    if (Platform.isMacOS || Platform.isLinux) {
-      await Process.run('chmod', ['+x', binaryFile.path]);
-    }
-
-    _binaryPath = binaryFile.path;
-    debugPrint('Using bundled FFmpeg at $_binaryPath');
+    debugPrint('System FFmpeg not found');
   }
 
   @override
   Future<FfmpegTask> execute(String command, {void Function(double progress)? onProgress, Duration? totalDuration}) async {
     if (_binaryPath == null) {
       await init();
+    }
+    
+    if (_binaryPath == null) {
+      throw Exception('FFmpeg not available');
     }
 
     final args = _parseArgs(command);
@@ -547,5 +537,71 @@ class DesktopFfmpegService implements FfmpegService {
       }
       return m.group(0)!;
     }).toList();
+  }
+}
+
+class MacosHybridFfmpegService implements FfmpegService {
+  final _desktopService = DesktopFfmpegService();
+  final _mobileService = MobileFfmpegService();
+  FfmpegService? _activeService;
+
+  @override
+  Future<void> init() async {
+    await _desktopService.init();
+    if (await _desktopService.isAvailable()) {
+      _activeService = _desktopService;
+    } else {
+      _activeService = _mobileService;
+      await _mobileService.init();
+    }
+  }
+
+  Future<FfmpegService> _getService() async {
+    if (_activeService == null) {
+      await init();
+    }
+    return _activeService!;
+  }
+
+  @override
+  Future<FfmpegTask> execute(String command, {void Function(double progress)? onProgress, Duration? totalDuration}) async {
+    final service = await _getService();
+    return service.execute(command, onProgress: onProgress, totalDuration: totalDuration);
+  }
+
+  @override
+  Future<MediaInfo> getMediaInfo(String path) async {
+    final service = await _getService();
+    return service.getMediaInfo(path);
+  }
+
+  @override
+  Future<ProbeResult> probeFile(String path) async {
+    final service = await _getService();
+    return service.probeFile(path);
+  }
+
+  @override
+  Future<bool> hasEncoder(String encoderName) async {
+    final service = await _getService();
+    return service.hasEncoder(encoderName);
+  }
+
+  @override
+  Future<bool> hasPixelFormat(String encoderName, String pixelFormat) async {
+    final service = await _getService();
+    return service.hasPixelFormat(encoderName, pixelFormat);
+  }
+
+  @override
+  Future<bool> isUsingSystemFfmpeg() async {
+    final service = await _getService();
+    return service.isUsingSystemFfmpeg();
+  }
+
+  @override
+  Future<bool> isAvailable() async {
+    final service = await _getService();
+    return service.isAvailable();
   }
 }
