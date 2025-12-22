@@ -28,6 +28,9 @@ jobs:
       - name: Install appdmg
         run: npm install -g appdmg
       
+      - name: Clean dist folder
+        run: rm -rf dist/
+      
       - name: Build macOS DMG
         run: fastforge release --name release --jobs macos-dmg
       
@@ -72,8 +75,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev
-          # ALSA for volume_controller plugin
-          sudo apt-get install -y libasound2-dev
+          # Audio libraries (ALSA for volume_controller, PulseAudio for media_kit)
+          sudo apt-get install -y libasound2-dev libpulse-dev
           # AppImage dependencies
           sudo apt-get install -y libfuse2 appstream
       
