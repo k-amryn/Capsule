@@ -57,6 +57,10 @@ jobs:
       - name: Install fastforge
         run: dart pub global activate fastforge
       
+      - name: Clean dist folder
+        run: Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+        shell: pwsh
+      
       - name: Build Windows EXE
         run: fastforge release --name release --jobs windows-exe
       
@@ -110,6 +114,9 @@ jobs:
           wget -O appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
           sudo mv appimagetool /usr/local/bin/
+      
+      - name: Clean dist and build folders
+        run: rm -rf dist/ build/
       
       - name: Build Linux AppImage
         run: fastforge release --name release --jobs linux-appimage
