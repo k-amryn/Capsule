@@ -3,7 +3,10 @@ PODS:
     - FlutterMacOS
   - desktop_drop (0.0.1):
     - FlutterMacOS
-  - ffmpeg_kit_flutter_new (1.0.0):
+  - ffmpeg_kit_flutter_new_full (7.1.1):
+    - ffmpeg_kit_flutter_new_full/full (= 7.1.1)
+    - FlutterMacOS
+  - ffmpeg_kit_flutter_new_full/full (7.1.1):
     - FlutterMacOS
   - file_selector_macos (0.0.1):
     - FlutterMacOS
@@ -37,7 +40,7 @@ PODS:
 DEPENDENCIES:
   - camera_macos (from `Flutter/ephemeral/.symlinks/plugins/camera_macos/macos`)
   - desktop_drop (from `Flutter/ephemeral/.symlinks/plugins/desktop_drop/macos`)
-  - ffmpeg_kit_flutter_new (from `Flutter/ephemeral/.symlinks/plugins/ffmpeg_kit_flutter_new/macos`)
+  - ffmpeg_kit_flutter_new_full (from `Flutter/ephemeral/.symlinks/plugins/ffmpeg_kit_flutter_new_full/macos`)
   - file_selector_macos (from `Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
   - gal (from `Flutter/ephemeral/.symlinks/plugins/gal/darwin`)
@@ -57,8 +60,8 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/camera_macos/macos
   desktop_drop:
     :path: Flutter/ephemeral/.symlinks/plugins/desktop_drop/macos
-  ffmpeg_kit_flutter_new:
-    :path: Flutter/ephemeral/.symlinks/plugins/ffmpeg_kit_flutter_new/macos
+  ffmpeg_kit_flutter_new_full:
+    :path: Flutter/ephemeral/.symlinks/plugins/ffmpeg_kit_flutter_new_full/macos
   file_selector_macos:
     :path: Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos
   FlutterMacOS:
@@ -89,7 +92,7 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   camera_macos: 9fd766915a6c236c8b3fd902f7ccd215636cd07a
   desktop_drop: 10a3e6a7fa9dbe350541f2574092fecfa345a07b
-  ffmpeg_kit_flutter_new: 46d48c622489abb98c2784a77855ee8d0fa0f28b
+  ffmpeg_kit_flutter_new_full: 633f11e0948681455c57ca8b6c761a95ca068cc7
   file_selector_macos: 9e9e068e90ebee155097d00e89ae91edb2374db7
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   gal: baecd024ebfd13c441269ca7404792a7152fde89
@@ -104,6 +107,6 @@ SPEC CHECKSUMS:
   wakelock_plus: 917609be14d812ddd9e9528876538b2263aaa03b
   window_manager: b729e31d38fb04905235df9ea896128991cad99e
 
-PODFILE CHECKSUM: 346bfb2deb41d4a6ebd6f6799f92188bde2d246f
+PODFILE CHECKSUM: 7eac3f7b29de84dde87b15f057288e672522a20f
 
 COCOAPODS: 1.16.2

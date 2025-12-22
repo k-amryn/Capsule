@@ -7,7 +7,7 @@ import Foundation
 
 import camera_macos
 import desktop_drop
-import ffmpeg_kit_flutter_new
+import ffmpeg_kit_flutter_new_full
 import file_selector_macos
 import gal
 import media_kit_libs_macos_video
