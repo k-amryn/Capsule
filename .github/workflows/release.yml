@@ -106,9 +106,6 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
       
-      - name: Install fastforge
-        run: dart pub global activate fastforge
-      
       - name: Install appimagetool
         run: |
           wget -O appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
@@ -119,7 +116,7 @@ jobs:
         run: rm -rf dist/ build/
       
       - name: Build Linux AppImage
-        run: fastforge release --name release --jobs linux-appimage
+        run: dart run fastforge release --name release --jobs linux-appimage
       
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
