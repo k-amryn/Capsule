@@ -107,6 +107,10 @@ patch_framework() {
             install_name_tool -change "/opt/homebrew/opt/zlib/lib/libz.1.dylib" "/usr/lib/libz.1.dylib" "$binary"
         fi
     fi
+    
+    # Verify
+    echo "      > Links:"
+    otool -L "$binary" | grep -E "FlutterMacOS|libSystem|libiconv|libz" | sed 's/^/        /'
 }
 
 echo "🩹 Patching frameworks..."
