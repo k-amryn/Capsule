@@ -22,29 +22,12 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
       
-      - name: Remove problematic FFmpeg plugin from macOS build
+      - name: Patch FFmpeg frameworks to use system libraries
         run: |
-          # The ffmpeg_kit_flutter_new_full package has corrupt binaries with duplicate
-          # LC_LOAD_DYLIB entries that cause linker failures. Remove it from the build.
-          # The app will use system ffmpeg via MacosHybridFfmpegService instead.
-          FFMPEG_PLUGIN="$HOME/.pub-cache/hosted/pub.dev/ffmpeg_kit_flutter_new_full-2.0.0/macos"
-          if [ -d "$FFMPEG_PLUGIN" ]; then
-            echo "Removing problematic FFmpeg frameworks to prevent linker errors..."
-            rm -rf "$FFMPEG_PLUGIN/Frameworks"
-            rm -f "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            # Create empty podspec to satisfy pod install
-            echo "Pod::Spec.new do |s|" > "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "  s.name = 'ffmpeg_kit_flutter_new'" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "  s.version = '2.0.0'" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "  s.summary = 'Disabled for macOS'" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "  s.homepage = 'https://github.com'" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "  s.license = { :type => 'MIT' }" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "  s.author = 'none'" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "  s.source = { :path => '.' }" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "  s.platform = :osx, '10.15'" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "end" >> "$FFMPEG_PLUGIN/ffmpeg_kit_flutter_new.podspec"
-            echo "Created stub podspec"
-          fi
+          # The ffmpeg_kit_flutter_new_full package has pre-built frameworks with
+          # hardcoded Homebrew library paths. Patch them to use system libraries
+          # so the app doesn't require end users to install Homebrew.
+          bash scripts/fix_ffmpeg_macos.sh
       
       - name: Install fastforge
         run: dart pub global activate fastforge
