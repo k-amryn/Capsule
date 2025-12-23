@@ -40,17 +40,6 @@ post_install do |installer|
     flutter_additional_macos_build_settings(target)
   end
 
-  # Patch FFmpeg libraries to use system zlib and libiconv
-  puts "Patching FFmpeg libraries..."
-  # Search in Pods and Flutter ephemeral directory to catch all symlinked frameworks
-  Dir.glob("{Pods,Flutter/ephemeral}/**/*.framework/Versions/A/*").each do |binary|
-    next if binary.include?(".plist") || binary.include?("_CodeSignature") || File.directory?(binary)
-    
-    # Patch the binary to use system libraries instead of Homebrew paths
-    system("install_name_tool -change /opt/homebrew/opt/zlib/lib/libz.1.dylib /usr/lib/libz.1.dylib \"#{binary}\" 2>/dev/null")
-    system("install_name_tool -change /opt/homebrew/opt/libiconv/lib/libiconv.2.dylib /usr/lib/libiconv.2.dylib \"#{binary}\" 2>/dev/null")
-  end
-
   # Force copy the custom AppIcon.icns into the build bundle
   # This bypasses the Asset Catalog compiler which often causes the "tiny icon" bug
   installer.aggregate_targets.each do |target|

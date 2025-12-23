@@ -1,135 +1,96 @@
 #!/bin/bash
-# fix_ffmpeg_macos.sh - Patch FFmpeg frameworks to use system libiconv
-# Run this script after `flutter pub get` when using ffmpeg_kit_flutter_new_full on macOS
-#
-# The problem: The ffmpeg_kit_flutter_new_full package ships pre-built frameworks
-# that have BOTH /usr/lib and /opt/homebrew paths linked for libiconv/libz.
-# This causes "duplicate linked dylib" errors at link time.
-#
-# The fix: Use install_name_tool to change homebrew paths to system paths.
-# If system paths are already linked, the -change command becomes a no-op
-# (it doesn't add duplicates, just removes the old reference).
+# fix_ffmpeg_macos.sh - Fix FFmpeg kit libiconv/zlib issues on macOS
 
 set -e
 
-# Find the package - try multiple possible versions
-PACKAGE_BASE="$HOME/.pub-cache/hosted/pub.dev"
-PACKAGE_NAME="ffmpeg_kit_flutter_new_full"
+echo "🔧 Setting up FFmpeg Kit macOS fix..."
 
-# Find the installed version
-PACKAGE_PATH=""
-for dir in "$PACKAGE_BASE"/${PACKAGE_NAME}-*/; do
-    if [ -d "$dir/macos/Frameworks" ]; then
-        PACKAGE_PATH="$dir/macos/Frameworks"
-        VERSION=$(basename "$(dirname "$(dirname "$PACKAGE_PATH")")" | sed "s/${PACKAGE_NAME}-//")
-        break
-    fi
-done
-
-if [ -z "$PACKAGE_PATH" ] || [ ! -d "$PACKAGE_PATH" ]; then
-    echo "❌ FFmpeg kit package not found in pub cache"
-    echo "   Expected location: $PACKAGE_BASE/${PACKAGE_NAME}-*/macos/Frameworks"
-    echo "   Make sure you've run 'flutter pub get' first"
+if [[ "$OSTYPE" != "darwin"* ]]; then
+    echo "❌ This script is only for macOS."
     exit 1
 fi
 
-echo "📦 Found ffmpeg_kit_flutter_new_full v$VERSION"
-echo "📁 Frameworks path: $PACKAGE_PATH"
-echo ""
-echo "🔧 Patching frameworks to remove homebrew paths..."
+# 1. Clean up corrupted binaries from previous "patching" attempts
+# The previous fix attempted to modify the binaries using install_name_tool,
+# which caused "duplicate linked dylib" errors because the binaries were modified
+# to point to /usr/lib while also having other references.
+# We need to ensure we are using the ORIGINAL, UNMODIFIED binaries from the package.
 
-patch_count=0
-for framework in "$PACKAGE_PATH"/*.framework; do
-    if [ -d "$framework" ]; then
-        framework_name=$(basename "$framework" .framework)
-        binary_path="$framework/Versions/A/$framework_name"
-        
-        if [ -f "$binary_path" ]; then
-            # Check current dependencies
-            deps=$(otool -L "$binary_path" 2>/dev/null || true)
-            
-            # Check if the binary has homebrew paths
-            has_homebrew=$(echo "$deps" | grep -c "/opt/homebrew\|/usr/local/opt" || echo "0")
-            
-            if [ "$has_homebrew" != "0" ]; then
-                echo "   Patching: $framework_name"
-                
-                # Change homebrew paths to system paths
-                # If the system path already exists, this effectively removes the duplicate
-                # because -change removes the old entry and points it to the new one
-                # (which already exists, so no new entry is added)
-                
-                # The key insight: -change replaces the LOAD command, it doesn't add a new one.
-                # So even if /usr/lib/libiconv.2.dylib is already linked, changing
-                # /opt/homebrew/.../libiconv.2.dylib to /usr/lib/libiconv.2.dylib
-                # will just make them both point to the same place (deduped by loader)
-                
-                install_name_tool -change \
-                    /opt/homebrew/opt/libiconv/lib/libiconv.2.dylib \
-                    /usr/lib/libiconv.2.dylib \
-                    "$binary_path" 2>/dev/null || true
-                
-                install_name_tool -change \
-                    /opt/homebrew/opt/zlib/lib/libz.1.dylib \
-                    /usr/lib/libz.1.dylib \
-                    "$binary_path" 2>/dev/null || true
-                
-                # Intel Mac homebrew paths
-                install_name_tool -change \
-                    /usr/local/opt/libiconv/lib/libiconv.2.dylib \
-                    /usr/lib/libiconv.2.dylib \
-                    "$binary_path" 2>/dev/null || true
-                
-                install_name_tool -change \
-                    /usr/local/opt/zlib/lib/libz.1.dylib \
-                    /usr/lib/libz.1.dylib \
-                    "$binary_path" 2>/dev/null || true
-                
-                ((patch_count++)) || true
-            else
-                echo "   ✓ No homebrew paths: $framework_name"
-            fi
-        fi
-    fi
-done
+echo "🔍 Checking for corrupted/patched frameworks in pub cache..."
 
-echo ""
-if [ $patch_count -gt 0 ]; then
-    echo "✅ Patched $patch_count framework(s)"
+# Find the package in pub cache
+# We look for the directory starting with ffmpeg_kit_flutter_new_full
+PUB_CACHE_HOME="${PUB_CACHE:-$HOME/.pub-cache}"
+PACKAGE_DIR=$(find "$PUB_CACHE_HOME/hosted/pub.dev" -maxdepth 2 -type d -name "ffmpeg_kit_flutter_new_full-*" | head -n 1)
+
+if [ -z "$PACKAGE_DIR" ]; then
+    echo "⚠️  FFmpeg kit package not found in pub cache. It might be downloaded later."
 else
-    echo "✅ All frameworks already patched"
-fi
-
-echo ""
-echo "🔍 Verifying libswresample (the framework that reported the error)..."
-SWRESAMPLE="$PACKAGE_PATH/libswresample.framework/Versions/A/libswresample"
-if [ -f "$SWRESAMPLE" ]; then
-    deps=$(otool -L "$SWRESAMPLE" 2>/dev/null | grep -E "(libiconv|libz)" || true)
-    echo "$deps"
+    echo "   Found package at: $PACKAGE_DIR"
     
-    # Check if any homebrew paths remain
-    if echo "$deps" | grep -q "/opt/homebrew\|/usr/local/opt"; then
-        echo ""
-        echo "⚠️  Homebrew paths still present after patching."
-        echo "    This is a known issue with ffmpeg_kit_flutter_new_full v2.0.0"
-        echo "    The framework has duplicate LC_LOAD_DYLIB entries that cannot be"
-        echo "    removed with install_name_tool -change alone."
-        echo ""
-        echo "    Attempting alternative fix: creating symlinks for homebrew paths..."
-        
-        # Create the homebrew directory structure and symlink to system libs
-        # This is a workaround - we make the expected paths point to system libs
-        sudo mkdir -p /opt/homebrew/opt/libiconv/lib
-        sudo mkdir -p /opt/homebrew/opt/zlib/lib
-        sudo ln -sf /usr/lib/libiconv.2.dylib /opt/homebrew/opt/libiconv/lib/libiconv.2.dylib 2>/dev/null || true
-        sudo ln -sf /usr/lib/libz.1.dylib /opt/homebrew/opt/zlib/lib/libz.1.dylib 2>/dev/null || true
-        
-        echo "✅ Created symlinks as fallback"
+    # Check if Frameworks exist (they might not if pod install hasn't run)
+    FRAMEWORK_TEST_FILE="$PACKAGE_DIR/macos/Frameworks/libavdevice.framework/libavdevice"
+    
+    if [ -f "$FRAMEWORK_TEST_FILE" ]; then
+        # Check if it links to /opt/homebrew/opt/libiconv...
+        # The original UNMODIFIED binary MUST link to the Homebrew path.
+        # If it doesn't, it means it was patched (likely to /usr/lib/...), which causes duplicates.
+        if ! otool -L "$FRAMEWORK_TEST_FILE" | grep -q "/opt/homebrew/opt/libiconv"; then
+            echo "🚨 Detected corrupted/patched frameworks!"
+            echo "   The frameworks are missing the expected Homebrew paths, which means they were patched."
+            echo "   This causes 'duplicate linked dylib' errors."
+            echo "   Removing corrupted package to force fresh download..."
+            rm -rf "$PACKAGE_DIR"
+            
+            echo "⬇️  Re-downloading package..."
+            flutter pub get
+            echo "✅ Package re-downloaded."
+        else
+            echo "✅ Frameworks appear to be clean (unpatched)."
+        fi
     else
-        echo ""
-        echo "✅ Verification passed - using system libraries"
+        echo "ℹ️  Frameworks not yet downloaded in package (normal for fresh install)."
     fi
 fi
 
-echo ""
-echo "📋 Patching complete!"
+# 2. Apply the Symlink Fix
+# Instead of modifying binaries, we create symlinks at the expected Homebrew paths pointing to system libraries.
+
+ICONV_PATH="/opt/homebrew/opt/libiconv/lib/libiconv.2.dylib"
+ZLIB_PATH="/opt/homebrew/opt/zlib/lib/libz.1.dylib"
+SYSTEM_ICONV="/usr/lib/libiconv.2.dylib"
+SYSTEM_ZLIB="/usr/lib/libz.1.dylib"
+
+echo "🔗 Checking/Creating symlinks..."
+
+create_symlink() {
+    local target="$1"
+    local source="$2"
+    local dir=$(dirname "$target")
+
+    if [ -L "$target" ]; then
+        current_dest=$(readlink "$target")
+        if [ "$current_dest" == "$source" ]; then
+            echo "   ✅ $target -> $source (OK)"
+            return
+        fi
+        echo "   ⚠️  $target points to $current_dest, updating..."
+    elif [ -f "$target" ]; then
+        echo "   ⚠️  $target is a real file. Skipping to avoid breaking real Homebrew."
+        return
+    fi
+
+    if [ ! -d "$dir" ]; then
+        echo "   Creating directory: $dir"
+        sudo mkdir -p "$dir"
+    fi
+
+    echo "   Linking $target -> $source"
+    sudo ln -sf "$source" "$target"
+}
+
+echo "   This may require sudo password:"
+create_symlink "$ICONV_PATH" "$SYSTEM_ICONV"
+create_symlink "$ZLIB_PATH" "$SYSTEM_ZLIB"
+
+echo "✅ Fix script completed."
