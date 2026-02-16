@@ -588,12 +588,21 @@ class DesktopFfmpegService implements FfmpegService {
       await init();
     }
 
+    // If running in an AppImage and using system FFmpeg, we must sanitize LD_LIBRARY_PATH
+    Map<String, String>? environment;
+    if (Platform.environment.containsKey('APPIMAGE') && _isSystemFfmpeg) {
+      environment = Map.from(Platform.environment);
+      environment.remove('LD_LIBRARY_PATH');
+    }
+
     // Run ffmpeg -i path
     // We rely on ffmpeg output to detect streams
     // Add -nostdin to prevent hanging if ffmpeg waits for input
     final result = await Process.run(
       _binaryPath!,
       ['-nostdin', '-i', path],
+      environment: environment,
+      includeParentEnvironment: environment == null,
       runInShell: Platform.isWindows,
     );
     final output = result.stderr.toString();
@@ -659,10 +668,22 @@ class DesktopFfmpegService implements FfmpegService {
 
     if (_binaryPath == null) return false;
 
+    // If running in an AppImage and using system FFmpeg, we must sanitize LD_LIBRARY_PATH
+    // to prevent FFmpeg from linking against AppImage's bundled libraries.
+    Map<String, String>? environment;
+    if (Platform.environment.containsKey('APPIMAGE') && _isSystemFfmpeg) {
+      environment = Map.from(Platform.environment);
+      environment.remove('LD_LIBRARY_PATH');
+    }
+
     // Run ffmpeg -encoders
-    final result = await Process.run(_binaryPath!, [
-      '-encoders',
-    ], runInShell: Platform.isWindows);
+    final result = await Process.run(
+      _binaryPath!,
+      ['-encoders'],
+      environment: environment,
+      includeParentEnvironment: environment == null,
+      runInShell: Platform.isWindows,
+    );
     final output = result.stdout.toString();
 
     debugPrint('Available encoders check for $encoderName');
@@ -678,11 +699,21 @@ class DesktopFfmpegService implements FfmpegService {
 
     if (_binaryPath == null) return false;
 
+    // If running in an AppImage and using system FFmpeg, we must sanitize LD_LIBRARY_PATH
+    Map<String, String>? environment;
+    if (Platform.environment.containsKey('APPIMAGE') && _isSystemFfmpeg) {
+      environment = Map.from(Platform.environment);
+      environment.remove('LD_LIBRARY_PATH');
+    }
+
     // Run ffmpeg -h encoder=name
-    final result = await Process.run(_binaryPath!, [
-      '-h',
-      'encoder=$encoderName',
-    ], runInShell: Platform.isWindows);
+    final result = await Process.run(
+      _binaryPath!,
+      ['-h', 'encoder=$encoderName'],
+      environment: environment,
+      includeParentEnvironment: environment == null,
+      runInShell: Platform.isWindows,
+    );
     final output = result.stdout.toString();
 
     // Look for "Supported pixel formats: ... pixelFormat ..."
@@ -704,25 +735,38 @@ class DesktopFfmpegService implements FfmpegService {
 
     if (_binaryPath == null) return false;
 
+    // If running in an AppImage and using system FFmpeg, we must sanitize LD_LIBRARY_PATH
+    Map<String, String>? environment;
+    if (Platform.environment.containsKey('APPIMAGE') && _isSystemFfmpeg) {
+      environment = Map.from(Platform.environment);
+      environment.remove('LD_LIBRARY_PATH');
+    }
+
     // Use ffprobe to get pixel formats of all video streams
     final ffprobePath = _binaryPath!.replaceAll('ffmpeg', 'ffprobe');
-    final result = await Process.run(ffprobePath, [
-      '-v',
-      'error',
-      '-select_streams',
-      'v',
-      '-show_entries',
-      'stream=pix_fmt',
-      '-of',
-      'default=noprint_wrappers=1:nokey=1',
-      path,
-    ], runInShell: Platform.isWindows);
+    final result = await Process.run(
+      ffprobePath,
+      [
+        '-v',
+        'error',
+        '-select_streams',
+        'v',
+        '-show_entries',
+        'stream=pix_fmt',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        path,
+      ],
+      environment: environment,
+      includeParentEnvironment: environment == null,
+      runInShell: Platform.isWindows,
+    );
 
     final output = result.stdout.toString().trim();
     if (output.isEmpty) return false;
 
     final lines = output.split('\n');
-    
+
     // If there's more than one video stream, it's likely an AVIF with alpha
     if (lines.length > 1 && path.toLowerCase().endsWith('.avif')) {
       return true;
