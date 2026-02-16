@@ -30,11 +30,11 @@ void main() async {
   if (!Platform.isAndroid && !Platform.isIOS) {
     await windowManager.ensureInitialized();
 
-    WindowOptions windowOptions = const WindowOptions(
-      size: Size(800, 600),
-      minimumSize: Size(460, 580),
+    WindowOptions windowOptions = WindowOptions(
+      size: const Size(800, 600),
+      minimumSize: const Size(460, 580),
       center: true,
-      backgroundColor: Colors.transparent,
+      backgroundColor: Platform.isLinux ? Colors.black : Colors.transparent,
       skipTaskbar: false,
       titleBarStyle: TitleBarStyle.hidden,
     );

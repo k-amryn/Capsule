@@ -87,7 +87,12 @@ class _VideoEditorState extends State<VideoEditor> {
 
     // Initialize single composite player
     _compositePlayer = Player();
-    _compositeController = VideoController(_compositePlayer);
+    _compositeController = VideoController(
+      _compositePlayer,
+      configuration: VideoControllerConfiguration(
+        enableHardwareAcceleration: !Platform.isLinux,
+      ),
+    );
 
     // Listen to video dimensions to correct aspect ratio if metadata extraction failed
     _playerSubscription = _compositePlayer.stream.videoParams.listen((params) {
@@ -568,22 +573,22 @@ class _VideoEditorState extends State<VideoEditor> {
       String speed = '';
 
       if (_outputFormat == 'av1') {
-        codec = _av1Encoder ?? 'libaom-av1';
+        codec = Platform.isLinux ? 'libaom-av1' : (_av1Encoder ?? 'libaom-av1');
         speed = _ffmpegService.getPresetFlag(codec, '8');
       } else if (_outputFormat == 'vp9') {
         codec = 'libvpx-vp9';
         speed = '-cpu-used 5';
       } else if (_outputFormat == 'h265') {
-        codec = _h265Encoder ?? 'libx265';
+        codec = Platform.isLinux ? 'libx265' : (_h265Encoder ?? 'libx265');
         speed = _ffmpegService.getPresetFlag(codec, 'ultrafast');
       } else {
         // h264 or default
-        codec = _h264Encoder ?? 'libx264';
+        codec = Platform.isLinux ? 'libx264' : (_h264Encoder ?? 'libx264');
         speed = _ffmpegService.getPresetFlag(codec, 'ultrafast');
       }
 
       debugPrint('Generating preview with codec: $codec');
-      var h264 = _h264Encoder ?? 'libx264';
+      var h264 = Platform.isLinux ? 'libx264' : (_h264Encoder ?? 'libx264');
       var h264Preset = _ffmpegService.getPresetFlag(h264, 'ultrafast');
 
       // Use correct quality flag based on encoder
@@ -700,6 +705,18 @@ class _VideoEditorState extends State<VideoEditor> {
       );
       _currentPreviewTask = compositeTask;
       await compositeTask.done;
+
+      // Verify file exists and has size
+      final compositeFile = File(compositePath);
+      if (await compositeFile.exists()) {
+        final size = await compositeFile.length();
+        debugPrint('Composite preview generated: $size bytes at $compositePath');
+        if (size < 1000) {
+          debugPrint('Warning: Composite preview file is suspiciously small');
+        }
+      } else {
+        debugPrint('Error: Composite preview file NOT FOUND at $compositePath');
+      }
 
       // Step 4: Open composite video in player
       await _compositePlayer.open(Media(compositePath));
