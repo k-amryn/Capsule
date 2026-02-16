@@ -114,11 +114,13 @@ class _AudioEditorState extends State<AudioEditor> {
     // Wait for duration to be available
     Duration? duration = player.state.duration;
     if (duration == Duration.zero) {
-      // If duration is not yet available, wait a bit or try to get it from ffmpeg info
-      // But usually open() should populate it.
-      // Let's rely on ffmpeg info if player doesn't have it yet, or wait for stream.
+      try {
+        duration = await player.stream.duration
+            .firstWhere((d) => d != Duration.zero)
+            .timeout(const Duration(seconds: 2));
+      } catch (_) {}
     }
-    
+
     // We already got info from ffmpeg above, let's use that if available
     try {
       final info = await _ffmpegService.getMediaInfo(widget.file.path);
@@ -409,6 +411,12 @@ class _AudioEditorState extends State<AudioEditor> {
         return;
       }
 
+      String outputPath = result.path;
+      final expectedExt = '.$ext';
+      if (!outputPath.toLowerCase().endsWith(expectedExt)) {
+        outputPath = '$outputPath$expectedExt';
+      }
+
       String codec;
       if (_outputFormat == 'mp3') {
         codec = 'libmp3lame';
@@ -419,14 +427,20 @@ class _AudioEditorState extends State<AudioEditor> {
       }
 
       debugPrint('Saving audio with codec: $codec');
+      _pauseAllPlayers();
 
+      int lastUpdate = 0;
       final task = await _ffmpegService.execute(
-        '-y -i "${widget.file.path}" -c:a $codec -b:a ${_bitrate.round()}k "${result.path}"',
+        '-y -i "${widget.file.path}" -c:a $codec -b:a ${_bitrate.round()}k "$outputPath"',
         onProgress: (progress) {
-          if (mounted) {
-            setState(() {
-              _progress = progress;
-            });
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (now - lastUpdate > 100 || progress >= 1.0) {
+            lastUpdate = now;
+            if (mounted) {
+              setState(() {
+                _progress = progress;
+              });
+            }
           }
         },
         totalDuration: _audioDuration,
@@ -435,7 +449,7 @@ class _AudioEditorState extends State<AudioEditor> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Audio saved successfully')),
+          SnackBar(content: Text('Audio saved to $outputPath')),
         );
       }
     } catch (e) {

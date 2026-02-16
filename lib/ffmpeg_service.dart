@@ -54,6 +54,8 @@ abstract class FfmpegService {
   Future<bool> isUsingSystemFfmpeg();
   Future<bool> isAvailable();
   Future<void> init();
+  Future<String?> getBestEncoder(List<String> candidates);
+  String getPresetFlag(String encoder, String speed);
 }
 
 class FfmpegServiceFactory {
@@ -322,6 +324,32 @@ class MobileFfmpegService implements FfmpegService {
     }
     return false;
   }
+
+  @override
+  Future<String?> getBestEncoder(List<String> candidates) async {
+    for (final encoder in candidates) {
+      if (await hasEncoder(encoder)) {
+        return encoder;
+      }
+    }
+    return null;
+  }
+
+  @override
+  String getPresetFlag(String encoder, String speed) {
+    if (encoder.startsWith('libx264') || encoder.startsWith('libx265')) {
+      return '-preset $speed';
+    } else if (encoder.contains('nvenc')) {
+      return '-preset fast';
+    } else if (encoder.contains('videotoolbox')) {
+      return '';
+    } else if (encoder == 'libaom-av1') {
+      return '-cpu-used 6';
+    } else if (encoder == 'libsvtav1') {
+      return '-preset 10';
+    }
+    return '';
+  }
 }
 
 class DesktopFfmpegService implements FfmpegService {
@@ -356,8 +384,14 @@ class DesktopFfmpegService implements FfmpegService {
       ], runInShell: Platform.isWindows);
 
       if (result.exitCode == 0) {
-        final systemPath = result.stdout.toString().trim().split('\n').first;
+        var systemPath = result.stdout.toString().trim().split('\n').first;
         if (systemPath.isNotEmpty) {
+          // Resolve symlink if possible
+          try {
+            systemPath = await File(systemPath).resolveSymbolicLinks();
+          } catch (e) {
+            // Ignore
+          }
           _binaryPath = systemPath;
           _isSystemFfmpeg = true;
           logger.log('Using system FFmpeg at $_binaryPath');
@@ -497,6 +531,7 @@ class DesktopFfmpegService implements FfmpegService {
       ['-i', path],
       environment: environment,
       includeParentEnvironment: environment == null,
+      runInShell: Platform.isWindows,
     );
 
     // Parse stderr (ffmpeg outputs info to stderr)
@@ -556,7 +591,11 @@ class DesktopFfmpegService implements FfmpegService {
     // Run ffmpeg -i path
     // We rely on ffmpeg output to detect streams
     // Add -nostdin to prevent hanging if ffmpeg waits for input
-    final result = await Process.run(_binaryPath!, ['-nostdin', '-i', path]);
+    final result = await Process.run(
+      _binaryPath!,
+      ['-nostdin', '-i', path],
+      runInShell: Platform.isWindows,
+    );
     final output = result.stderr.toString();
 
     debugPrint('Probe output for $path:\n$output');
@@ -665,13 +704,13 @@ class DesktopFfmpegService implements FfmpegService {
 
     if (_binaryPath == null) return false;
 
-    // Use ffprobe to get pixel format
+    // Use ffprobe to get pixel formats of all video streams
     final ffprobePath = _binaryPath!.replaceAll('ffmpeg', 'ffprobe');
     final result = await Process.run(ffprobePath, [
       '-v',
       'error',
       '-select_streams',
-      'v:0',
+      'v',
       '-show_entries',
       'stream=pix_fmt',
       '-of',
@@ -679,18 +718,56 @@ class DesktopFfmpegService implements FfmpegService {
       path,
     ], runInShell: Platform.isWindows);
 
-    final pixFmt = result.stdout.toString().trim();
-    if (pixFmt.isEmpty) return false;
+    final output = result.stdout.toString().trim();
+    if (output.isEmpty) return false;
 
-    // Pixel formats with alpha typically contain these patterns
-    return pixFmt.contains('rgba') ||
-        pixFmt.contains('yuva') ||
-        pixFmt.contains('gbrap') ||
-        pixFmt.contains('argb') ||
-        pixFmt.contains('abgr') ||
-        pixFmt.contains('bgra') ||
-        pixFmt.contains('ya') ||
-        pixFmt.contains('pal8'); // palette can have alpha
+    final lines = output.split('\n');
+    
+    // If there's more than one video stream, it's likely an AVIF with alpha
+    if (lines.length > 1 && path.toLowerCase().endsWith('.avif')) {
+      return true;
+    }
+
+    for (final pixFmt in lines) {
+      // Pixel formats with alpha typically contain these patterns
+      if (pixFmt.contains('rgba') ||
+          pixFmt.contains('yuva') ||
+          pixFmt.contains('gbrap') ||
+          pixFmt.contains('argb') ||
+          pixFmt.contains('abgr') ||
+          pixFmt.contains('bgra') ||
+          pixFmt.contains('ya') ||
+          pixFmt.contains('pal8')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @override
+  Future<String?> getBestEncoder(List<String> candidates) async {
+    for (final encoder in candidates) {
+      if (await hasEncoder(encoder)) {
+        return encoder;
+      }
+    }
+    return null;
+  }
+
+  @override
+  String getPresetFlag(String encoder, String speed) {
+    if (encoder.startsWith('libx264') || encoder.startsWith('libx265')) {
+      return '-preset $speed';
+    } else if (encoder.contains('nvenc')) {
+      return '-preset fast';
+    } else if (encoder.contains('videotoolbox')) {
+      return '';
+    } else if (encoder == 'libaom-av1') {
+      return '-cpu-used 6';
+    } else if (encoder == 'libsvtav1') {
+      return '-preset 10';
+    }
+    return '';
   }
 
   void _parseProgress(
@@ -847,5 +924,21 @@ class MacosHybridFfmpegService implements FfmpegService {
     await _ensureInitialized();
     // Use mobile service for probing as it's typically faster
     return _mobileService.hasAlphaChannel(path);
+  }
+
+  @override
+  Future<String?> getBestEncoder(List<String> candidates) async {
+    await _ensureInitialized();
+    // Check both services. If either has it, we can use it.
+    String? inMobile = await _mobileService.getBestEncoder(candidates);
+    if (inMobile != null) return inMobile;
+
+    return await _desktopService.getBestEncoder(candidates);
+  }
+
+  @override
+  String getPresetFlag(String encoder, String speed) {
+    // Both services use the same logic for presets
+    return _desktopService.getPresetFlag(encoder, speed);
   }
 }

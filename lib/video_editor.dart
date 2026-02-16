@@ -77,6 +77,7 @@ class _VideoEditorState extends State<VideoEditor> {
   // Optimization
   Timer? _debounceTimer;
   FfmpegTask? _currentPreviewTask;
+  StreamSubscription? _playerSubscription;
 
   @override
   void initState() {
@@ -87,6 +88,26 @@ class _VideoEditorState extends State<VideoEditor> {
     // Initialize single composite player
     _compositePlayer = Player();
     _compositeController = VideoController(_compositePlayer);
+
+    // Listen to video dimensions to correct aspect ratio if metadata extraction failed
+    _playerSubscription = _compositePlayer.stream.videoParams.listen((params) {
+      if (params.w != null &&
+          params.h != null &&
+          params.w! > 0 &&
+          params.h! > 0) {
+        // The composite video is 2x width.
+        // So original aspect ratio is (width/2) / height.
+        final newRatio = (params.w! / 2) / params.h!;
+        // Update if significantly different
+        if (_aspectRatio == null || (_aspectRatio! - newRatio).abs() > 0.01) {
+          if (mounted) {
+            setState(() {
+              _aspectRatio = newRatio;
+            });
+          }
+        }
+      }
+    });
 
     // Mute audio as requested
     _compositePlayer.setVolume(0);
@@ -118,6 +139,7 @@ class _VideoEditorState extends State<VideoEditor> {
 
   @override
   void dispose() {
+    _playerSubscription?.cancel();
     _debounceTimer?.cancel();
     _currentPreviewTask?.cancel();
 
@@ -147,14 +169,14 @@ class _VideoEditorState extends State<VideoEditor> {
       // Check for hardware acceleration and encoders
       try {
         // 1. AV1: Prefer libsvtav1 (System) then libaom-av1 (FFmpegKit)
-        _av1Encoder = await _findEncoder([
+        _av1Encoder = await _ffmpegService.getBestEncoder([
           'libsvtav1',
           'av1_videotoolbox',
           'libaom-av1',
         ]);
 
         // 2. H.265: Prefer Hardware (FFmpegKit) then libx265 (System)
-        _h265Encoder = await _findEncoder([
+        _h265Encoder = await _ffmpegService.getBestEncoder([
           'hevc_videotoolbox',
           'hevc_mediacodec',
           'hevc_nvenc',
@@ -165,7 +187,7 @@ class _VideoEditorState extends State<VideoEditor> {
         ]);
 
         // 3. H.264: Prefer Hardware (FFmpegKit) then libx264 (System)
-        _h264Encoder = await _findEncoder([
+        _h264Encoder = await _ffmpegService.getBestEncoder([
           'h264_videotoolbox',
           'h264_mediacodec',
           'h264_nvenc',
@@ -212,6 +234,50 @@ class _VideoEditorState extends State<VideoEditor> {
         }
       } catch (e) {
         debugPrint('Error getting media info: $e');
+
+        // Fallback: Try to get info using a temporary player
+        Duration fallbackDuration = const Duration(seconds: 10);
+        double fallbackAspectRatio = 16 / 9;
+        int fallbackWidth = 1920;
+        int fallbackHeight = 1080;
+
+        try {
+          final tempPlayer = Player();
+          await tempPlayer.open(Media(widget.file.path), play: false);
+
+          // Wait for duration
+          try {
+            final duration = await tempPlayer.stream.duration
+                .firstWhere((d) => d != Duration.zero)
+                .timeout(const Duration(seconds: 2));
+            fallbackDuration = duration;
+          } catch (_) {}
+
+          // Wait for dimensions
+          try {
+            final params = await tempPlayer.stream.videoParams
+                .firstWhere((p) => p.w != null && p.h != null)
+                .timeout(const Duration(seconds: 2));
+            if (params.w != null && params.h != null && params.h! > 0) {
+              fallbackAspectRatio = params.w! / params.h!;
+              fallbackWidth = params.w!;
+              fallbackHeight = params.h!;
+            }
+          } catch (_) {}
+
+          await tempPlayer.dispose();
+        } catch (e) {
+          debugPrint('Fallback media info failed: $e');
+        }
+
+        if (mounted) {
+          setState(() {
+            _aspectRatio = fallbackAspectRatio;
+            _videoDuration = fallbackDuration;
+            _originalWidth = fallbackWidth;
+            _originalHeight = fallbackHeight;
+          });
+        }
       }
 
       setState(() {
@@ -502,30 +568,31 @@ class _VideoEditorState extends State<VideoEditor> {
       String speed = '';
 
       if (_outputFormat == 'av1') {
-        if (_av1Encoder != null) {
-          codec = _av1Encoder!;
-        } else {
-          codec = 'libaom-av1';
-          speed = '-cpu-used 8'; // Fastest for preview
-        }
+        codec = _av1Encoder ?? 'libaom-av1';
+        speed = _ffmpegService.getPresetFlag(codec, '8');
       } else if (_outputFormat == 'vp9') {
         codec = 'libvpx-vp9';
         speed = '-cpu-used 5';
       } else if (_outputFormat == 'h265') {
         codec = _h265Encoder ?? 'libx265';
-        if (_hasH265Software) {
-          speed = '-preset ultrafast';
-        }
+        speed = _ffmpegService.getPresetFlag(codec, 'ultrafast');
       } else {
         // h264 or default
         codec = _h264Encoder ?? 'libx264';
-        if (codec == 'libx264') {
-          speed = '-preset ultrafast';
-        }
+        speed = _ffmpegService.getPresetFlag(codec, 'ultrafast');
       }
 
       debugPrint('Generating preview with codec: $codec');
-      final h264 = _h264Encoder ?? 'libx264';
+      var h264 = _h264Encoder ?? 'libx264';
+      var h264Preset = _ffmpegService.getPresetFlag(h264, 'ultrafast');
+
+      // Use correct quality flag based on encoder
+      String h264Quality = '-crf 18';
+      if (h264.contains('nvenc')) {
+        h264Quality = '-cq 18';
+      } else if (h264.contains('videotoolbox')) {
+        h264Quality = '-q:v 65';
+      }
 
       final scaleFilter =
           'scale=trunc(iw*$_resolution/2)*2:trunc(ih*$_resolution/2)*2';
@@ -533,9 +600,25 @@ class _VideoEditorState extends State<VideoEditor> {
       // Step 1 & 2: Generate original and compressed clips in PARALLEL
       final originalFuture = _ffmpegService
           .execute(
-            '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -c:v $h264 -preset ultrafast -crf 18 -an "$originalClipPath"',
+            '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -c:v $h264 $h264Preset $h264Quality -pix_fmt yuv420p -an "$originalClipPath"',
           )
-          .then((task) => task.done);
+          .then((task) => task.done)
+          .catchError((e) async {
+        debugPrint('Original clip failed with $h264, falling back to libx264');
+
+        // Update state to disable broken hardware encoder
+        if (h264 != 'libx264') {
+          h264 = 'libx264';
+          h264Preset = _ffmpegService.getPresetFlag(h264, 'ultrafast');
+          _h264Encoder = 'libx264';
+          if (mounted) setState(() {});
+        }
+
+        final task = await _ffmpegService.execute(
+          '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p -an "$originalClipPath"',
+        );
+        return task.done;
+      });
 
       Future<void> compressedFuture;
 
@@ -543,31 +626,29 @@ class _VideoEditorState extends State<VideoEditor> {
         // For VP9: First compress to VP9 (to generate artifacts), then transcode to H.264
         compressedFuture = _ffmpegService
             .execute(
-              '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 -an "$tempVp9Path"',
+              '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -pix_fmt yuv420p -threads 0 -row-mt 1 -an "$tempVp9Path"',
             )
             .then((task) {
-              _currentPreviewTask = task;
-              return task.done;
-            })
-            .then(
-              (_) => _ffmpegService.execute(
-                '-y -i "$tempVp9Path" -c:v $h264 -preset ultrafast -crf 18 -threads 0 -an "$compressedClipPath"',
-              ),
-            )
-            .then((task) {
-              _currentPreviewTask = task;
-              return task.done;
-            });
+          _currentPreviewTask = task;
+          return task.done;
+        }).then(
+          (_) => _ffmpegService.execute(
+            '-y -i "$tempVp9Path" -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p -threads 0 -an "$compressedClipPath"',
+          ),
+        ).then((task) {
+          _currentPreviewTask = task;
+          return task.done;
+        });
       } else {
         // AV1 (or others) - direct compression to MP4
         compressedFuture = _ffmpegService
             .execute(
-              '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 -an "$compressedClipPath"',
+              '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -pix_fmt yuv420p -threads 0 -row-mt 1 -an "$compressedClipPath"',
             )
             .then((task) {
-              _currentPreviewTask = task;
-              return task.done;
-            });
+          _currentPreviewTask = task;
+          return task.done;
+        });
       }
 
       // Wait for both clips to be generated
@@ -575,28 +656,47 @@ class _VideoEditorState extends State<VideoEditor> {
         await Future.wait([originalFuture, compressedFuture]);
       } catch (e) {
         debugPrint('Preview generation failed with $codec: $e');
-        // Fallback to H.264 if VP9/AV1 fails
-        if (_outputFormat == 'vp9' ||
-            _outputFormat == 'av1' ||
-            _outputFormat == 'h265') {
-          debugPrint('Falling back to H.264 for preview');
-          final fallbackTask = await _ffmpegService.execute(
-            '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v $h264 -preset ultrafast -b:v ${_bitrate.round()}k -an "$compressedClipPath"',
-          );
-          _currentPreviewTask = fallbackTask;
-          await fallbackTask.done;
-        } else {
-          rethrow;
+
+        // If the compressed clip failed and we were using a hardware encoder, disable it
+        if (codec != 'libx264' &&
+            codec != 'libx265' &&
+            codec != 'libaom-av1' &&
+            codec != 'libsvtav1' &&
+            codec != 'libvpx-vp9') {
+          debugPrint('Disabling broken encoder: $codec');
+          if (_outputFormat == 'h265') {
+            _h265Encoder = 'libx265';
+          } else if (_outputFormat == 'h264') {
+            _h264Encoder = 'libx264';
+          } else if (_outputFormat == 'av1') {
+            _av1Encoder = 'libaom-av1';
+          }
+          if (mounted) setState(() {});
         }
+
+        // Fallback to libx264 if anything fails
+        debugPrint('Falling back to libx264 for preview');
+        final fallbackTask = await _ffmpegService.execute(
+          '-y -ss $startTimeStr -t 2 -i "${widget.file.path}" -vf $scaleFilter -c:v libx264 -preset ultrafast -b:v ${_bitrate.round()}k -pix_fmt yuv420p -an "$compressedClipPath"',
+        );
+        _currentPreviewTask = fallbackTask;
+        await fallbackTask.done;
       }
 
       // Step 3: Create composite video using FFmpeg hstack filter
       // This combines original (left) and compressed (right) into a single video
       // Using -crf 18 for high quality to preserve visible compression artifacts
+      // Recalculate quality flag in case h264 changed (fallback)
+      if (h264.contains('libx264')) {
+        h264Quality = '-crf 18';
+      } else if (h264.contains('nvenc')) {
+        h264Quality = '-cq 18';
+      }
+
       final compositeTask = await _ffmpegService.execute(
         '-y -i "$originalClipPath" -i "$compressedClipPath" '
-        '-filter_complex "[0:v]setpts=PTS-STARTPTS[a];[1:v]setpts=PTS-STARTPTS[b];[a][b]hstack=inputs=2[v]" '
-        '-map "[v]" -c:v $h264 -preset ultrafast -crf 18 -an "$compositePath"',
+        '-filter_complex "[0:v]setpts=PTS-STARTPTS[a];[1:v]setpts=PTS-STARTPTS[b];[b][a]scale2ref=ref_w:ref_h[b_scaled][a_ref];[a_ref][b_scaled]hstack=inputs=2[v]" '
+        '-map "[v]" -c:v $h264 $h264Preset $h264Quality -pix_fmt yuv420p -an "$compositePath"',
       );
       _currentPreviewTask = compositeTask;
       await compositeTask.done;
@@ -662,30 +762,28 @@ class _VideoEditorState extends State<VideoEditor> {
         return;
       }
 
+      // Ensure extension
+      final expectedExt = _outputFormat == 'vp9' ? '.webm' : '.mp4';
+      if (!outputPath!.toLowerCase().endsWith(expectedExt)) {
+        outputPath = '$outputPath$expectedExt';
+      }
+
       String codec;
       String speed = '';
 
       if (_outputFormat == 'av1') {
         codec = _av1Encoder ?? 'libaom-av1';
-        if (codec == 'libsvtav1') {
-          speed = '-preset 10';
-        } else if (codec == 'libaom-av1') {
-          speed = '-cpu-used 6';
-        }
+        speed = _ffmpegService.getPresetFlag(codec, '6');
       } else if (_outputFormat == 'vp9') {
         codec = 'libvpx-vp9';
         speed = '-cpu-used 6'; // Faster encoding
       } else if (_outputFormat == 'h265') {
         codec = _h265Encoder ?? 'libx265';
-        if (codec == 'libx265') {
-          speed = '-preset fast';
-        }
+        speed = _ffmpegService.getPresetFlag(codec, 'fast');
       } else {
         // h264
         codec = _h264Encoder ?? 'libx264';
-        if (codec == 'libx264') {
-          speed = '-preset fast';
-        }
+        speed = _ffmpegService.getPresetFlag(codec, 'fast');
       }
 
       debugPrint('Saving video with codec: $codec');
@@ -695,18 +793,67 @@ class _VideoEditorState extends State<VideoEditor> {
       final scaleFilter =
           'scale=trunc(iw*$_resolution/2)*2:trunc(ih*$_resolution/2)*2';
 
-      final task = await _ffmpegService.execute(
-        '-y -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -threads 0 -row-mt 1 "$outputPath"',
-        onProgress: (progress) {
-          if (mounted) {
-            setState(() {
-              _progress = progress;
-            });
+      try {
+        final task = await _ffmpegService.execute(
+          '-y -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -pix_fmt yuv420p -threads 0 -row-mt 1 "$outputPath"',
+          onProgress: (progress) {
+            if (mounted) {
+              setState(() {
+                _progress = progress;
+              });
+            }
+          },
+          totalDuration: _videoDuration,
+        );
+        await task.done;
+      } catch (e) {
+        // Check for hardware encoder failure and fallback
+        bool isHardware = codec != 'libx264' &&
+            codec != 'libx265' &&
+            codec != 'libaom-av1' &&
+            codec != 'libsvtav1' &&
+            codec != 'libvpx-vp9';
+
+        if (isHardware) {
+          debugPrint('Saving failed with $codec, falling back to software');
+
+          // Update state for future files
+          if (_outputFormat == 'h265') {
+            _h265Encoder = 'libx265';
+            codec = 'libx265';
+          } else if (_outputFormat == 'h264') {
+            _h264Encoder = 'libx264';
+            codec = 'libx264';
+          } else if (_outputFormat == 'av1') {
+            _av1Encoder = 'libaom-av1';
+            codec = 'libaom-av1';
           }
-        },
-        totalDuration: _videoDuration,
-      );
-      await task.done;
+          if (mounted) setState(() {});
+
+          // Update speed preset for software
+          if (_outputFormat == 'av1') {
+            speed = _ffmpegService.getPresetFlag(codec, '6');
+          } else {
+            speed = _ffmpegService.getPresetFlag(codec, 'fast');
+          }
+
+          // Retry with software encoder
+          final task = await _ffmpegService.execute(
+            '-y -i "${widget.file.path}" -vf $scaleFilter -c:v $codec -b:v ${_bitrate.round()}k $speed -pix_fmt yuv420p -threads 0 -row-mt 1 "$outputPath"',
+            onProgress: (progress) {
+              if (mounted) {
+                setState(() {
+                  _progress = progress;
+                });
+              }
+            },
+            totalDuration: _videoDuration,
+          );
+          await task.done;
+        } else {
+          rethrow;
+        }
+      }
 
       if (Platform.isAndroid || Platform.isIOS) {
         await Gal.putVideo(outputPath);
@@ -767,14 +914,5 @@ class _VideoEditorState extends State<VideoEditor> {
       i++;
     }
     return '${v.toStringAsFixed(decimals)} ${suffixes[i]}';
-  }
-
-  Future<String?> _findEncoder(List<String> candidates) async {
-    for (final encoder in candidates) {
-      if (await _ffmpegService.hasEncoder(encoder)) {
-        return encoder;
-      }
-    }
-    return null;
   }
 }

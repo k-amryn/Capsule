@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'dart:ui';
+import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/gestures.dart';
@@ -36,6 +36,9 @@ class _BatchViewState extends State<BatchView> {
   bool _isSaving = false;
   double _batchProgress = 0.0;
   late FfmpegService _ffmpegService;
+  String? _av1Encoder;
+  String? _h265Encoder;
+  String? _h264Encoder;
 
   @override
   void dispose() {
@@ -47,8 +50,34 @@ class _BatchViewState extends State<BatchView> {
   void initState() {
     super.initState();
     _ffmpegService = FfmpegServiceFactory.create();
-    _ffmpegService.init();
+    _ffmpegService.init().then((_) => _initializeEncoders());
     _initializeSettings();
+  }
+
+  Future<void> _initializeEncoders() async {
+    _av1Encoder = await _ffmpegService.getBestEncoder([
+      'libsvtav1',
+      'av1_videotoolbox',
+      'libaom-av1',
+    ]);
+    _h265Encoder = await _ffmpegService.getBestEncoder([
+      'hevc_videotoolbox',
+      'hevc_mediacodec',
+      'hevc_nvenc',
+      'hevc_amf',
+      'hevc_qsv',
+      'hevc_vaapi',
+      'libx265',
+    ]);
+    _h264Encoder = await _ffmpegService.getBestEncoder([
+      'h264_videotoolbox',
+      'h264_mediacodec',
+      'h264_nvenc',
+      'h264_amf',
+      'h264_qsv',
+      'h264_vaapi',
+      'libx264',
+    ]);
   }
 
   void _initializeSettings() {
@@ -327,18 +356,20 @@ class _BatchViewState extends State<BatchView> {
 
       String codec;
       String speed = '';
-      bool hasHw = await _ffmpegService.hasEncoder('av1_videotoolbox');
 
       if (s.outputFormat == 'av1') {
-        if (hasHw) {
-          codec = 'av1_videotoolbox';
-        } else {
-          codec = 'libaom-av1';
-          speed = '-cpu-used 6';
-        }
-      } else {
+        codec = _av1Encoder ?? 'libaom-av1';
+        speed = _ffmpegService.getPresetFlag(codec, '6');
+      } else if (s.outputFormat == 'vp9') {
         codec = 'libvpx-vp9';
         speed = '-cpu-used 6';
+      } else if (s.outputFormat == 'h265') {
+        codec = _h265Encoder ?? 'libx265';
+        speed = _ffmpegService.getPresetFlag(codec, 'fast');
+      } else {
+        // h264
+        codec = _h264Encoder ?? 'libx264';
+        speed = _ffmpegService.getPresetFlag(codec, 'fast');
       }
 
       final scaleFilter =
@@ -354,13 +385,57 @@ class _BatchViewState extends State<BatchView> {
         debugPrint('Error getting duration for progress: $e');
       }
 
-      await _ffmpegService
-          .execute(
-            '-y -i "${file.path}" -vf $scaleFilter -c:v $codec -b:v ${s.bitrate.round()}k $speed -threads 0 -row-mt 1 "$outputPath"',
-            onProgress: onProgress,
-            totalDuration: duration,
-          )
-          .then((t) => t.done);
+      try {
+        await _ffmpegService
+            .execute(
+              '-y -i "${file.path}" -vf $scaleFilter -c:v $codec -b:v ${s.bitrate.round()}k $speed -pix_fmt yuv420p -threads 0 -row-mt 1 "$outputPath"',
+              onProgress: onProgress,
+              totalDuration: duration,
+            )
+            .then((t) => t.done);
+      } catch (e) {
+        // Check for hardware encoder failure and fallback
+        bool isHardware = codec != 'libx264' &&
+            codec != 'libx265' &&
+            codec != 'libaom-av1' &&
+            codec != 'libsvtav1' &&
+            codec != 'libvpx-vp9';
+
+        if (isHardware) {
+          debugPrint(
+              'Batch processing failed with $codec, falling back to software');
+
+          // Update state for future files
+          if (s.outputFormat == 'h265') {
+            _h265Encoder = 'libx265';
+            codec = 'libx265';
+          } else if (s.outputFormat == 'h264') {
+            _h264Encoder = 'libx264';
+            codec = 'libx264';
+          } else if (s.outputFormat == 'av1') {
+            _av1Encoder = 'libaom-av1';
+            codec = 'libaom-av1';
+          }
+
+          // Update speed preset for software
+          if (s.outputFormat == 'av1') {
+            speed = _ffmpegService.getPresetFlag(codec, '6');
+          } else {
+            speed = _ffmpegService.getPresetFlag(codec, 'fast');
+          }
+
+          // Retry with software encoder
+          await _ffmpegService
+              .execute(
+                '-y -i "${file.path}" -vf $scaleFilter -c:v $codec -b:v ${s.bitrate.round()}k $speed -pix_fmt yuv420p -threads 0 -row-mt 1 "$outputPath"',
+                onProgress: onProgress,
+                totalDuration: duration,
+              )
+              .then((t) => t.done);
+        } else {
+          rethrow;
+        }
+      }
     } else if (widget.mediaType == MediaType.image) {
       final s = _settings as ImageSettings;
       extension = s.outputFormat;
@@ -379,98 +454,54 @@ class _BatchViewState extends State<BatchView> {
         command =
             '-y -i "${file.path}" $scaleFilter -c:v libwebp -q:v ${s.quality.round()} -pix_fmt yuva420p -frames:v 1 -update 1 "$outputPath"';
       } else if (s.outputFormat == 'avif') {
-        int crf = (63 - ((s.quality - 1) * (63 / 99))).round().clamp(0, 63);
+        // AVIF - Use two-step approach for transparency and resolution compatibility
+        String inputPath = file.path;
+        String? tempScaledPath;
 
-        bool hasAom = await _ffmpegService.hasEncoder('libaom-av1');
-        bool hasSvt = await _ffmpegService.hasEncoder('libsvtav1');
-        bool sourceHasAlpha = await _ffmpegService.hasAlphaChannel(file.path);
-
-        // Pick the encoder to use - prefer libaom-av1 for better AVIF compatibility
-        String encoder = hasAom ? 'libaom-av1' : (hasSvt ? 'libsvtav1' : '');
-
-        if (encoder.isEmpty) {
-          debugPrint('No AV1 encoder available for AVIF');
-          command =
-              '-y -i "${file.path}" $scaleFilter -frames:v 1 -update 1 "$outputPath"';
-        } else if (sourceHasAlpha) {
-          // Source has alpha - check for native alpha support
-          bool supportsAlpha = await _ffmpegService.hasPixelFormat(
-            encoder,
-            'yuva420p',
-          );
-
-          if (supportsAlpha) {
-            // Use native alpha support
-            String speed = (encoder == 'libsvtav1')
-                ? '-preset 10'
-                : '-cpu-used 6';
-            String filter;
-            if (scaleFilter.isNotEmpty) {
-              String sf = scaleFilter.replaceAll('-vf ', '');
-              filter =
-                  '$sf,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva420p';
-            } else {
-              filter =
-                  'scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva420p';
-            }
-            command =
-                '-y -i "${file.path}" -vf "$filter" -c:v $encoder -crf $crf $speed '
-                '-color_range full -colorspace bt709 -color_primaries bt709 -color_trc bt709 '
-                '-still-picture 1 "$outputPath"';
-          } else {
-            // Use two-stream mapping for transparency.
-            // We split the input into color and alpha streams, then map them to the AVIF muxer.
-            // We force the alpha stream to 'gray' to ensure it has exactly one plane.
-            String filter;
-            if (scaleFilter.isNotEmpty) {
-              String sf = scaleFilter.replaceAll('-vf ', '');
-              filter =
-                  '[0:v]$sf,format=rgba,split[c][a];[c]scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv420p[co];[a]alphaextract,scale=in_range=full:out_range=full,format=gray[ao]';
-            } else {
-              filter =
-                  '[0:v]format=rgba,split[c][a];[c]scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv420p[co];[a]alphaextract,scale=in_range=full:out_range=full,format=gray[ao]';
-            }
-
-            String speed = (encoder == 'libsvtav1')
-                ? '-preset 10'
-                : '-cpu-used 6';
-
-            // Map both streams. Stream 0 is color, Stream 1 is alpha.
-            // We add explicit color space metadata to prevent color distortion.
-            command =
-                '-y -i "${file.path}" -filter_complex "$filter" '
-                '-map "[co]" -c:v:0 $encoder $speed '
-                '-color_range:v:0 full -colorspace:v:0 bt709 -color_primaries:v:0 bt709 -color_trc:v:0 bt709 '
-                '-map "[ao]" -c:v:1 $encoder $speed '
-                '-color_range:v:1 full '
-                '-crf $crf -still-picture 1 "$outputPath"';
-          }
-        } else if (hasAom || hasSvt) {
-          // No alpha channel - simple single-stream encode.
-          // We add explicit color space metadata to prevent "magenta/green" color distortion.
-          String speed = (encoder == 'libsvtav1')
-              ? '-preset 10'
-              : '-cpu-used 6';
-          // For non-alpha images, we also use a filter to ensure the color conversion is high quality and full range.
-          String filter;
-          if (scaleFilter.isNotEmpty) {
-            String sf = scaleFilter.replaceAll('-vf ', '');
-            filter =
-                '$sf,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv420p';
-          } else {
-            filter =
-                'scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv420p';
-          }
-
-          command =
-              '-y -i "${file.path}" -vf "$filter" -c:v $encoder -crf $crf $speed '
-              '-color_range full -colorspace bt709 -color_primaries bt709 -color_trc bt709 '
-              '-still-picture 1 "$outputPath"';
-        } else {
-          // No AV1 encoder available at all - fallback
-          command =
-              '-y -i "${file.path}" $scaleFilter -frames:v 1 -update 1 "$outputPath"';
+        if (s.resolution < 1.0) {
+          // Step 1: Scale to intermediate PNG (preserves transparency)
+          final tempDir = await getTemporaryDirectory();
+          tempScaledPath =
+              '${tempDir.path}/temp_scaled_${p.basename(file.path)}.png';
+          final scaleCommand =
+              '-y -i "$inputPath" $scaleFilter -c:v png -pix_fmt rgba "$tempScaledPath"';
+          await _ffmpegService.execute(scaleCommand).then((t) => t.done);
+          inputPath = tempScaledPath;
         }
+
+        final hasAlpha = await _ffmpegService.hasAlphaChannel(inputPath);
+        int crf = (63 - (s.quality * 0.63)).round().clamp(0, 63);
+
+        String filter;
+        String mapping;
+        if (hasAlpha) {
+          // Use two-stream approach for transparency
+          // Note: inputPath is already scaled if resolution < 1.0
+          filter = '-filter_complex "[0:v]split[vcolor][valpha];[valpha]alphaextract[valphaout]"';
+          mapping =
+              '-map [vcolor] -c:v:0 libaom-av1 -crf:v:0 $crf -pix_fmt:v:0 yuv420p -map [valphaout] -c:v:1 libaom-av1 -crf:v:1 $crf -pix_fmt:v:1 gray -aom-params:v:1 matrix-coefficients=1';
+          command =
+              '-y -i "$inputPath" $filter $mapping -still-picture 1 -cpu-used 6 -strict experimental -frames:v:0 1 -frames:v:1 1 "$outputPath"';
+        } else {
+          // Single stream for non-transparent images
+          // If inputPath was scaled, scaleFilter is already applied to it
+          final currentFilter = tempScaledPath != null ? '' : scaleFilter;
+          mapping = '-c:v libaom-av1 -crf $crf -pix_fmt yuv420p';
+          command =
+              '-y -i "$inputPath" $currentFilter $mapping -still-picture 1 -cpu-used 6 -strict experimental -frames:v 1 "$outputPath"';
+        }
+
+        // Execute AVIF conversion
+        await _ffmpegService.execute(command).then((t) => t.done);
+
+        // Clean up temp scaled PNG
+        if (tempScaledPath != null) {
+          try {
+            await File(tempScaledPath).delete();
+          } catch (_) {}
+        }
+
+        command = ''; // Skip default execution
       } else {
         // JPEG
         int qValue = (31 - ((s.quality - 1) * (29 / 99))).round().clamp(2, 31);
@@ -478,11 +509,14 @@ class _BatchViewState extends State<BatchView> {
             '-y -i "${file.path}" $scaleFilter -q:v $qValue -pix_fmt yuvj420p -frames:v 1 -update 1 "$outputPath"';
       }
 
-      // Image compression is usually fast, but we can simulate progress or just mark done
-      // FFmpeg doesn't give great progress for single image
-      onProgress(0.5);
-      await _ffmpegService.execute(command).then((t) => t.done);
-      onProgress(1.0);
+      if (command.isNotEmpty) {
+        final task = await _ffmpegService.execute(command);
+        // Image compression is usually fast, but we can simulate progress or just mark done
+        // FFmpeg doesn't give great progress for single image
+        onProgress(0.5);
+        await task.done;
+        onProgress(1.0);
+      }
     } else if (widget.mediaType == MediaType.audio) {
       final s = _settings as AudioSettings;
       extension = s.outputFormat == 'mp3'

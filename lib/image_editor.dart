@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
@@ -36,6 +37,7 @@ class ImageEditor extends StatefulWidget {
 
 class _ImageEditorState extends State<ImageEditor> {
   File? _compressedFile;
+  File? _compressedPreviewFile;
   File? _previewFile;
   bool _isCompressing = false;
   double _quality = 80;
@@ -107,7 +109,7 @@ class _ImageEditorState extends State<ImageEditor> {
               ),
               compressed: _compressedFile != null
                   ? Image.file(
-                      _compressedFile!,
+                      _compressedPreviewFile ?? _compressedFile!,
                       key: ValueKey(_previewKey),
                       fit: BoxFit.contain,
                       alignment: Alignment.center,
@@ -542,112 +544,67 @@ class _ImageEditorState extends State<ImageEditor> {
         command =
             '-y -i "${widget.file.path}" $scaleFilter -c:v libwebp -q:v ${_quality.round()} -pix_fmt yuva420p -frames:v 1 -update 1 "$outputPath"';
       } else if (_outputFormat == 'avif') {
-        // AVIF
-        int crf = (63 - ((_quality - 1) * (63 / 99))).round();
-        crf = crf.clamp(0, 63);
+        // AVIF - Use two-step approach for transparency and resolution compatibility
+        String inputPath = widget.file.path;
+        String? tempScaledPath;
 
-        bool hasAom = await _ffmpegService.hasEncoder('libaom-av1');
-        bool hasSvt = await _ffmpegService.hasEncoder('libsvtav1');
-        bool sourceHasAlpha = await _ffmpegService.hasAlphaChannel(
-          widget.file.path,
-        );
-
-        // Pick the encoder to use - prefer libaom-av1 for better AVIF compatibility
-        String encoder = hasAom ? 'libaom-av1' : (hasSvt ? 'libsvtav1' : '');
-
-        if (encoder.isEmpty) {
-          debugPrint('No AV1 encoder available for AVIF');
-          command =
-              '-y -i "${widget.file.path}" $scaleFilter -frames:v 1 -update 1 "$outputPath"';
-        } else if (sourceHasAlpha) {
-          // Source has alpha - check for native alpha support
-          bool supportsAlpha = await _ffmpegService.hasPixelFormat(
-            encoder,
-            'yuva420p',
-          );
-
-          if (supportsAlpha) {
-            // Use native alpha support
-            String speed = (encoder == 'libsvtav1')
-                ? '-preset 10'
-                : '-cpu-used 6';
-            String filter;
-            if (scaleFilter.isNotEmpty) {
-              String s = scaleFilter.replaceAll('-vf ', '');
-              filter =
-                  '$s,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva420p';
-            } else {
-              filter =
-                  'scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva420p';
-            }
-            command =
-                '-y -i "${widget.file.path}" -vf "$filter" -c:v $encoder -crf $crf $speed '
-                '-color_range full -colorspace bt709 -color_primaries bt709 -color_trc bt709 '
-                '-still-picture 1 "$outputPath"';
-          } else {
-            // Use two-stream mapping for transparency.
-            // We split the input into color and alpha streams, then map them to the AVIF muxer.
-            // We force the alpha stream to 'gray' to ensure it has exactly one plane.
-            String filter;
-            if (scaleFilter.isNotEmpty) {
-              String s = scaleFilter.replaceAll('-vf ', '');
-              filter =
-                  '[0:v]$s,format=rgba,split[c][a];[c]scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv420p[co];[a]alphaextract,scale=in_range=full:out_range=full,format=gray[ao]';
-            } else {
-              filter =
-                  '[0:v]format=rgba,split[c][a];[c]scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv420p[co];[a]alphaextract,scale=in_range=full:out_range=full,format=gray[ao]';
-            }
-
-            String speed = (encoder == 'libsvtav1')
-                ? '-preset 10'
-                : '-cpu-used 6';
-
-            // Map both streams. Stream 0 is color, Stream 1 is alpha.
-            // We add explicit color space metadata to prevent color distortion.
-            command =
-                '-y -i "${widget.file.path}" -filter_complex "$filter" '
-                '-map "[co]" -c:v:0 $encoder $speed '
-                '-color_range:v:0 full -colorspace:v:0 bt709 -color_primaries:v:0 bt709 -color_trc:v:0 bt709 '
-                '-map "[ao]" -c:v:1 $encoder $speed '
-                '-color_range:v:1 full '
-                '-crf $crf -still-picture 1 "$outputPath"';
-          }
-        } else if (hasAom || hasSvt) {
-          // No alpha channel - simple single-stream encode.
-          // We add explicit color space metadata to prevent "magenta/green" color distortion.
-          String speed = (encoder == 'libsvtav1')
-              ? '-preset 10'
-              : '-cpu-used 6';
-          // For non-alpha images, we also use a filter to ensure the color conversion is high quality and full range.
-          String filter;
-          if (scaleFilter.isNotEmpty) {
-            String s = scaleFilter.replaceAll('-vf ', '');
-            filter =
-                '$s,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv420p';
-          } else {
-            filter =
-                'scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv420p';
-          }
-
-          command =
-              '-y -i "${widget.file.path}" -vf "$filter" -c:v $encoder -crf $crf $speed '
-              '-color_range full -colorspace bt709 -color_primaries bt709 -color_trc bt709 '
-              '-still-picture 1 "$outputPath"';
-        } else {
-          // No AV1 encoder available at all - fallback
-          command =
-              '-y -i "${widget.file.path}" $scaleFilter -frames:v 1 -update 1 "$outputPath"';
+        if (_resolution < 1.0) {
+          // Step 1: Scale to intermediate PNG (preserves transparency)
+          tempScaledPath = '${tempDir.path}/temp_scaled.png';
+          final scaleCommand =
+              '-y -i "$inputPath" $scaleFilter -c:v png -pix_fmt rgba "$tempScaledPath"';
+          final task = await _ffmpegService.execute(scaleCommand);
+          _currentTask = task;
+          await task.done;
+          _currentTask = null;
+          inputPath = tempScaledPath;
         }
+
+        final hasAlpha = await _ffmpegService.hasAlphaChannel(inputPath);
+        int crf = (63 - (_quality * 0.63)).round().clamp(0, 63);
+
+        String filter;
+        String mapping;
+        if (hasAlpha) {
+          // Use two-stream approach for transparency
+          // Note: inputPath is already scaled if resolution < 1.0
+          filter = '-filter_complex "[0:v]split[vcolor][valpha];[valpha]alphaextract[valphaout]"';
+          mapping =
+              '-map [vcolor] -c:v:0 libaom-av1 -crf:v:0 $crf -pix_fmt:v:0 yuv420p -map [valphaout] -c:v:1 libaom-av1 -crf:v:1 $crf -pix_fmt:v:1 gray -aom-params:v:1 matrix-coefficients=1';
+          command =
+              '-y -i "$inputPath" $filter $mapping -still-picture 1 -cpu-used 6 -strict experimental -frames:v:0 1 -frames:v:1 1 "$outputPath"';
+        } else {
+          // Single stream for non-transparent images
+          // If inputPath was scaled, scaleFilter is already applied to it
+          final currentFilter = tempScaledPath != null ? '' : scaleFilter;
+          mapping = '-c:v libaom-av1 -crf $crf -pix_fmt yuv420p';
+          command =
+              '-y -i "$inputPath" $currentFilter $mapping -still-picture 1 -cpu-used 6 -strict experimental -frames:v 1 "$outputPath"';
+        }
+
+        // Execute AVIF conversion
+        await _ffmpegService.execute(command).then((t) => t.done);
+
+        // Clean up temp scaled PNG
+        if (tempScaledPath != null) {
+          try {
+            await File(tempScaledPath).delete();
+          } catch (_) {}
+        }
+
+        command = ''; // Skip default execution
       } else {
         // JPEG
         command =
             '-y -i "${widget.file.path}" $scaleFilter -q:v $qValue -pix_fmt yuvj420p -frames:v 1 -update 1 "$outputPath"';
       }
 
-      final task = await _ffmpegService.execute(command);
-      _currentTask = task;
-      await task.done;
-      _currentTask = null;
+      if (command.isNotEmpty) {
+        final task = await _ffmpegService.execute(command);
+        _currentTask = task;
+        await task.done;
+        _currentTask = null;
+      }
 
       if (myJobId != _jobId) {
         debugPrint('Compression finished but job is stale (new job started)');
@@ -660,6 +617,36 @@ class _ImageEditorState extends State<ImageEditor> {
         final size = await outputFile.length();
 
         if (size > 0) {
+          // If AVIF, generate PNG preview for UI to ensure transparency support
+          File? previewFile;
+          if (_outputFormat == 'avif') {
+            try {
+              final previewPath = '${tempDir.path}/preview_compressed.png';
+              
+              // Check if the output AVIF has alpha (multiple streams)
+              final hasAlpha = await _ffmpegService.hasAlphaChannel(outputPath);
+              
+              String command;
+              if (hasAlpha) {
+                 // Use alphamerge to combine the two streams for correct transparency preview
+                 command = '-y -i "$outputPath" -filter_complex "[0:v:0][0:v:1]alphamerge" -pix_fmt rgba -frames:v 1 -update 1 "$previewPath"';
+              } else {
+                 // Standard conversion
+                 command = '-y -i "$outputPath" -pix_fmt rgba -frames:v 1 -update 1 "$previewPath"';
+              }
+
+              await _ffmpegService
+                  .execute(command)
+                  .then((t) => t.done);
+
+              if (await File(previewPath).exists()) {
+                previewFile = File(previewPath);
+              }
+            } catch (e) {
+              debugPrint('Error generating AVIF preview: $e');
+            }
+          }
+
           // Force image cache eviction to ensure UI updates
           PaintingBinding.instance.imageCache.clear();
           PaintingBinding.instance.imageCache.clearLiveImages();
@@ -667,6 +654,7 @@ class _ImageEditorState extends State<ImageEditor> {
           if (mounted) {
             setState(() {
               _compressedFile = outputFile;
+              _compressedPreviewFile = previewFile;
               _compressedSize = _formatBytes(size);
               _previewKey++;
             });
@@ -743,12 +731,18 @@ class _ImageEditorState extends State<ImageEditor> {
         return;
       }
 
+      String finalPath = fileName;
+      final expectedExt = '.$_outputFormat';
+      if (!finalPath.toLowerCase().endsWith(expectedExt)) {
+        finalPath = '$finalPath$expectedExt';
+      }
+
       try {
-        await _compressedFile!.copy(fileName);
+        await _compressedFile!.copy(finalPath);
         if (mounted) {
           ScaffoldMessenger.of(
             context,
-          ).showSnackBar(SnackBar(content: Text('Saved to $fileName')));
+          ).showSnackBar(SnackBar(content: Text('Saved to $finalPath')));
         }
       } catch (e) {
         if (mounted) {
