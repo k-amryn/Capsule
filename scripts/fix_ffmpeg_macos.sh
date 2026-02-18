@@ -105,6 +105,14 @@ patch_thin_binary() {
     codesign --remove-signature "$binary" 2>/dev/null || true
     chmod 755 "$binary"
 
+    # REPAIR STEP: Fix malformed __LINKEDIT segment
+    # This is required for binaries that cause "link edit information does not fill the __LINKEDIT segment" errors
+    if ! install_name_tool -id "@rpath/$binary_name" "$binary" 2>/dev/null; then
+        echo "      🔧 Repairing binary layout..."
+        # Using strip -S often fixes the segment alignment issues
+        strip -S "$binary" 2>/dev/null || true
+    fi
+
     local deps=$(get_deps "$binary")
     for dep in $deps; do
         if is_homebrew_path "$dep"; then
@@ -114,9 +122,16 @@ patch_thin_binary() {
             if [ -f "$FRAMEWORKS_DIR/$dep_name" ]; then
                 echo "      Patching: $dep -> @rpath/$dep_name"
                 # Use the exact dependency string from otool
-                if ! install_name_tool -change "$dep" "@rpath/$dep_name" "$binary"; then
-                    echo "      ❌ FAILED to patch $binary_name"
-                    exit 1
+                if ! install_name_tool -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null; then
+                    echo "      🔧 Patch failed, attempting deep repair..."
+                    # Force a re-layout of the binary using codesign
+                    codesign --force --sign - "$binary" 2>/dev/null || true
+                    codesign --remove-signature "$binary" 2>/dev/null || true
+
+                    if ! install_name_tool -change "$dep" "@rpath/$dep_name" "$binary"; then
+                        echo "      ❌ FAILED to patch $binary_name even after repair"
+                        exit 1
+                    fi
                 fi
 
                 # VERIFY IMMEDIATELY
