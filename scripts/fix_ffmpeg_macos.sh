@@ -1,13 +1,15 @@
 #!/bin/bash
-# fix_ffmpeg_macos.sh - Super Nuclear Option
+# fix_ffmpeg_macos.sh - Reconstruction Option
 #
-# This script is designed to be the ultimate solution for bundling Homebrew
-# dependencies in a macOS app bundle. It uses an aggressive, recursive
-# approach to ensure every single dependency is caught and patched.
+# This script is the ultimate solution for bundling Homebrew dependencies.
+# It reconstructs every binary by extracting its architecture slices,
+# patching them individually, and then recombining them into a NEW binary.
+# This ensures that no "in-place" modification issues or file locking
+# can prevent the changes from sticking.
 
 set -uo pipefail
 
-echo "☢️  FFmpeg macOS Post-Build Fix (SUPER NUCLEAR OPTION)"
+echo "☢️  FFmpeg macOS Post-Build Fix (RECONSTRUCTION OPTION)"
 echo "====================================================="
 
 # Find the .app bundle
@@ -37,6 +39,10 @@ mkdir -p "$FRAMEWORKS_DIR"
 # Ensure everything is writable
 chmod -R +w "$APP_PATH"
 
+# Temporary directory for reconstruction
+RECON_DIR=$(mktemp -d)
+trap "rm -rf '$RECON_DIR'" EXIT
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -54,10 +60,40 @@ is_homebrew_path() {
 }
 
 # ============================================================================
-# The Core Logic: Recursive Bundling and Patching
+# Core Logic: Reconstruction and Patching
 # ============================================================================
 
-bundle_and_patch() {
+bundle_dependency() {
+    local dep_path="$1"
+    local dep_name=$(basename "$dep_path")
+    local dest="$FRAMEWORKS_DIR/$dep_name"
+
+    if [ ! -f "$dest" ]; then
+        echo "      📦 Bundling: $dep_name"
+        local src="$dep_path"
+        if [ ! -f "$src" ]; then
+            # Try to find it via brew prefix
+            local formula=$(echo "$dep_path" | cut -d'/' -f4)
+            local prefix=$(brew --prefix "$formula" 2>/dev/null || echo "")
+            if [ -n "$prefix" ] && [ -f "$prefix/lib/$dep_name" ]; then
+                src="$prefix/lib/$dep_name"
+            else
+                src=$(find "$BREW_PREFIX" -name "$dep_name" -type f 2>/dev/null | head -n 1)
+            fi
+        fi
+
+        if [ -n "$src" ] && [ -f "$src" ]; then
+            cp -L "$src" "$dest"
+            chmod 755 "$dest"
+            # Recursively process the newly bundled library
+            reconstruct_and_patch "$dest"
+        else
+            echo "      ⚠️  WARNING: Could not find source for $dep_path"
+        fi
+    fi
+}
+
+reconstruct_and_patch() {
     local binary="$1"
     local binary_name=$(basename "$binary")
 
@@ -65,71 +101,69 @@ bundle_and_patch() {
         return 0
     fi
 
-    echo "   Scanning: $binary_name"
+    echo "   Reconstructing: $binary_name"
 
-    # Remove signature to allow patching
-    codesign --remove-signature "$binary" 2>/dev/null || true
-
-    local deps=$(get_deps "$binary")
-    local changed=0
-
-    for dep in $deps; do
-        if is_homebrew_path "$dep"; then
-            local dep_name=$(basename "$dep")
-            local dest="$FRAMEWORKS_DIR/$dep_name"
-
-            # 1. Bundle if missing
-            if [ ! -f "$dest" ]; then
-                echo "      📦 Bundling dependency: $dep_name"
-                # Find the source
-                local src="$dep"
-                if [ ! -f "$src" ]; then
-                    # Try to find it via brew prefix if the path in the binary is broken
-                    local formula=$(echo "$dep" | cut -d'/' -f4)
-                    local prefix=$(brew --prefix "$formula" 2>/dev/null || echo "")
-                    if [ -n "$prefix" ] && [ -f "$prefix/lib/$dep_name" ]; then
-                        src="$prefix/lib/$dep_name"
-                    else
-                        # Last resort: find anywhere in Homebrew
-                        src=$(find "$BREW_PREFIX" -name "$dep_name" -type f 2>/dev/null | head -n 1)
-                    fi
-                fi
-
-                if [ -n "$src" ] && [ -f "$src" ]; then
-                    cp -L "$src" "$dest"
-                    chmod 755 "$dest"
-                    # Recursively process the newly bundled library
-                    bundle_and_patch "$dest"
-                else
-                    echo "      ⚠️  WARNING: Could not find source for $dep"
-                    continue
-                fi
-            fi
-
-            # 2. Patch the binary to use @rpath
-            # We use -arch flags for FAT binaries to be absolutely sure
-            local archs=$(lipo -archs "$binary" 2>/dev/null || echo "")
-            if [ -n "$archs" ]; then
-                for arch in $archs; do
-                    install_name_tool -arch "$arch" -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null || true
-                done
-            fi
-            # Also run without -arch as a catch-all
-            install_name_tool -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null || true
-            changed=1
-        fi
-    done
-
-    # Update dylib ID if it's a library
-    if [[ "$binary_name" == *.dylib ]] || [[ "$binary" == *".framework/"* ]]; then
-        install_name_tool -id "@rpath/$binary_name" "$binary" 2>/dev/null || true
+    # 1. Extract architectures
+    local archs=$(lipo -archs "$binary" 2>/dev/null || echo "")
+    if [ -z "$archs" ]; then
+        echo "      ⚠️  Could not determine architectures for $binary_name"
+        return 0
     fi
 
-    # Add standard RPATHs
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$binary" 2>/dev/null || true
-    install_name_tool -add_rpath "@loader_path/Frameworks" "$binary" 2>/dev/null || true
-    install_name_tool -add_rpath "@loader_path/../Frameworks" "$binary" 2>/dev/null || true
-    install_name_tool -add_rpath "@loader_path/../../.." "$binary" 2>/dev/null || true
+    local work_dir="$RECON_DIR/patch_${RANDOM}_$$"
+    mkdir -p "$work_dir"
+
+    local thin_files=""
+    for arch in $archs; do
+        local thin_file="$work_dir/$arch"
+        if ! lipo -thin "$arch" -output "$thin_file" "$binary" 2>/dev/null; then
+            echo "      ⚠️  Failed to extract $arch for $binary_name"
+            continue
+        fi
+
+        # 2. Patch the thin slice
+        chmod 755 "$thin_file"
+        codesign --remove-signature "$thin_file" 2>/dev/null || true
+
+        local deps=$(get_deps "$thin_file")
+        for dep in $deps; do
+            if is_homebrew_path "$dep"; then
+                local dep_name=$(basename "$dep")
+                bundle_dependency "$dep"
+                if [ -f "$FRAMEWORKS_DIR/$dep_name" ]; then
+                    install_name_tool -change "$dep" "@rpath/$dep_name" "$thin_file" 2>/dev/null || true
+                fi
+            fi
+        done
+
+        # Update dylib ID
+        if [[ "$binary_name" == *.dylib ]] || [[ "$binary" == *".framework/"* ]]; then
+            install_name_tool -id "@rpath/$binary_name" "$thin_file" 2>/dev/null || true
+        fi
+
+        thin_files="$thin_files $thin_file"
+    done
+
+    # 3. Recombine into a NEW binary
+    if [ -n "$thin_files" ]; then
+        local new_binary="$work_dir/reconstructed"
+        if lipo -create $thin_files -output "$new_binary" 2>/dev/null; then
+            # Add RPATHs to the new binary
+            install_name_tool -add_rpath "@executable_path/../Frameworks" "$new_binary" 2>/dev/null || true
+            install_name_tool -add_rpath "@loader_path/Frameworks" "$new_binary" 2>/dev/null || true
+            install_name_tool -add_rpath "@loader_path/../Frameworks" "$new_binary" 2>/dev/null || true
+            install_name_tool -add_rpath "@loader_path/../../.." "$new_binary" 2>/dev/null || true
+
+            # Move the new binary into place
+            cp "$new_binary" "$binary"
+            chmod 755 "$binary"
+            echo "      ✓ Reconstructed and patched successfully"
+        else
+            echo "      ⚠️  Failed to recombine $binary_name"
+        fi
+    fi
+
+    rm -rf "$work_dir"
 }
 
 # ============================================================================
@@ -137,25 +171,25 @@ bundle_and_patch() {
 # ============================================================================
 
 echo ""
-echo "🚀 Phase 1: Initial scan and recursive bundling..."
-# We use a temporary file to store the list of binaries to avoid subshell issues
-BINARIES_TO_PATCH=$(mktemp)
-find "$APP_PATH/Contents" -type f > "$BINARIES_TO_PATCH"
+echo "🚀 Phase 1: Reconstructing and patching all binaries..."
+# Find all Mach-O files first to avoid issues with the bundle changing
+ALL_BINARIES=$(mktemp)
+find "$APP_PATH/Contents" -type f > "$ALL_BINARIES"
 
 while read -r file; do
     if is_macho "$file"; then
-        bundle_and_patch "$file"
+        reconstruct_and_patch "$file"
     fi
-done < "$BINARIES_TO_PATCH"
+done < "$ALL_BINARIES"
 
 echo ""
-echo "🚀 Phase 2: Final sweep of all bundled libraries..."
+echo "🚀 Phase 2: Final sweep of bundled dylibs..."
 for dylib in "$FRAMEWORKS_DIR"/*.dylib; do
-    [ -f "$dylib" ] && bundle_and_patch "$dylib"
+    [ -f "$dylib" ] && reconstruct_and_patch "$dylib"
 done
 
 # ============================================================================
-# Verification
+# Final Verification
 # ============================================================================
 
 echo ""
@@ -176,9 +210,9 @@ while read -r file; do
             FAILED=$((FAILED + 1))
         fi
     fi
-done < "$BINARIES_TO_PATCH"
+done < "$ALL_BINARIES"
 
-rm -f "$BINARIES_TO_PATCH"
+rm -f "$ALL_BINARIES"
 
 echo ""
 echo "=============================================="
@@ -187,5 +221,5 @@ if [ "$FAILED" -gt 0 ]; then
     exit 1
 fi
 
-echo "✅ SUCCESS: All $TOTAL binaries verified and patched!"
+echo "✅ SUCCESS: All $TOTAL binaries verified and reconstructed!"
 exit 0
