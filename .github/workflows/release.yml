@@ -24,7 +24,16 @@ jobs:
 
       - name: Install Homebrew dependencies for bundling
         run: |
+          # Ensure Homebrew is in PATH
+          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+
+          # Install all required dependencies
           brew install libpng fontconfig freetype fribidi harfbuzz graphite2 glib pcre2 srt openssl@3 gettext expat brotli zlib bzip2 libiconv xz
+
+          # Show where libs are installed (for debugging)
+          echo "Homebrew prefix: $(brew --prefix)"
+          echo "zlib location: $(brew --prefix zlib)/lib"
+          ls -la "$(brew --prefix zlib)/lib/" || echo "zlib lib not found"
 
       - name: Install fastforge
         run: dart pub global activate fastforge
@@ -40,10 +49,17 @@ jobs:
 
       - name: Fix FFmpeg dependencies in app bundle
         run: |
+          # Ensure Homebrew is in PATH
+          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+
           # Find the built .app and patch all Homebrew dependencies
           APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d | head -n 1)
           echo "Found app: $APP_PATH"
-          bash scripts/fix_ffmpeg_macos.sh "$APP_PATH"
+          echo "Homebrew prefix: $(brew --prefix)"
+
+          # Make script executable and run with bash explicitly
+          chmod +x scripts/fix_ffmpeg_macos.sh
+          bash -x scripts/fix_ffmpeg_macos.sh "$APP_PATH"
 
       - name: Re-sign app bundle
         run: |
