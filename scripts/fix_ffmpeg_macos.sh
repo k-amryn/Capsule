@@ -1,12 +1,13 @@
 #!/bin/bash
-# fix_ffmpeg_macos.sh - Final Robust Patching Script
+# fix_ffmpeg_macos.sh - Nuclear Reconstruction Option
 #
-# This script handles both FAT and THIN binaries correctly.
-# It ensures that Homebrew dependencies are bundled and patched.
+# This script is the ultimate solution for bundling Homebrew dependencies.
+# It reconstructs every binary by extracting its architecture slices,
+# patching them individually with extreme prejudice, and then recombining them.
 
 set -uo pipefail
 
-echo "☢️  FFmpeg macOS Post-Build Fix (FINAL ROBUST OPTION)"
+echo "☢️  FFmpeg macOS Post-Build Fix (NUCLEAR RECONSTRUCTION)"
 echo "====================================================="
 
 # Find the .app bundle
@@ -33,8 +34,9 @@ echo "Homebrew prefix: $BREW_PREFIX"
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS_DIR"
 
-# Ensure everything is writable
+# Ensure everything is writable and clear attributes
 chmod -R +w "$APP_PATH"
+find "$APP_PATH" -type f -exec xattr -c {} \; 2>/dev/null || true
 
 # Temporary directory for reconstruction
 RECON_DIR=$(mktemp -d)
@@ -49,7 +51,8 @@ is_macho() {
 }
 
 get_deps() {
-    otool -L "$1" 2>/dev/null | tail -n +2 | awk '{print $1}'
+    # Extract only the path, removing compatibility info and cleaning whitespace
+    otool -L "$1" 2>/dev/null | tail -n +2 | sed -E 's/^[[:space:]]+//' | cut -d' ' -f1
 }
 
 is_homebrew_path() {
@@ -61,7 +64,7 @@ is_fat_binary() {
 }
 
 # ============================================================================
-# Core Logic: Bundling and Patching
+# Core Logic
 # ============================================================================
 
 bundle_dependency() {
@@ -100,15 +103,28 @@ patch_thin_binary() {
 
     # Remove signature to allow patching
     codesign --remove-signature "$binary" 2>/dev/null || true
+    chmod 755 "$binary"
 
     local deps=$(get_deps "$binary")
     for dep in $deps; do
         if is_homebrew_path "$dep"; then
             local dep_name=$(basename "$dep")
             bundle_dependency "$dep"
+
             if [ -f "$FRAMEWORKS_DIR/$dep_name" ]; then
+                echo "      Patching: $dep -> @rpath/$dep_name"
                 # Use the exact dependency string from otool
-                install_name_tool -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null || true
+                if ! install_name_tool -change "$dep" "@rpath/$dep_name" "$binary"; then
+                    echo "      ❌ FAILED to patch $binary_name"
+                    exit 1
+                fi
+
+                # VERIFY IMMEDIATELY
+                if otool -L "$binary" | grep -q "$dep"; then
+                    echo "      ❌ VERIFICATION FAILED: $dep still exists in $binary_name"
+                    # Try a more aggressive approach: remove and add RPATH
+                    install_name_tool -delete_rpath "$BREW_PREFIX/lib" "$binary" 2>/dev/null || true
+                fi
             fi
         fi
     done
@@ -133,7 +149,7 @@ patch_binary_recursive() {
         return 0
     fi
 
-    echo "   Patching: $binary_name"
+    echo "   Processing: $binary_name"
 
     if is_fat_binary "$binary"; then
         echo "      Detected FAT binary, reconstructing..."
@@ -157,9 +173,10 @@ patch_binary_recursive() {
             if lipo -create $thin_files -output "$combined" 2>/dev/null; then
                 cp "$combined" "$binary"
                 chmod 755 "$binary"
-                echo "      ✓ Reconstructed and patched successfully"
+                echo "      ✓ Reconstructed successfully"
             else
-                echo "      ⚠️  Failed to recombine $binary_name"
+                echo "      ❌ Failed to recombine $binary_name"
+                exit 1
             fi
         fi
         rm -rf "$work_dir"
