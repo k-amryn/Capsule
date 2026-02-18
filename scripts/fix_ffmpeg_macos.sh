@@ -1,9 +1,11 @@
+
+
+<file_content>
 #!/bin/bash
-# fix_ffmpeg_macos.sh - Nuclear Reconstruction Option
+# fix_ffmpeg_macos.sh - Nuclear Reconstruction Option with LLVM support
 #
 # This script is the ultimate solution for bundling Homebrew dependencies.
-# It reconstructs every binary by extracting its architecture slices,
-# patching them individually with extreme prejudice, and then recombining them.
+# It uses llvm-install_name_tool which is much more resilient to malformed binaries.
 
 set -uo pipefail
 
@@ -30,6 +32,16 @@ else
     BREW_PREFIX="/usr/local"
 fi
 echo "Homebrew prefix: $BREW_PREFIX"
+
+# Find LLVM tools (installed via brew install llvm)
+LLVM_INSTALL_NAME_TOOL=$(find "$BREW_PREFIX/opt/llvm/bin" -name "llvm-install_name_tool" | head -n 1)
+if [ -z "$LLVM_INSTALL_NAME_TOOL" ]; then
+    echo "⚠️  llvm-install_name_tool not found, falling back to system tool"
+    PATCH_TOOL="install_name_tool"
+else
+    echo "✅ Using $LLVM_INSTALL_NAME_TOOL"
+    PATCH_TOOL="$LLVM_INSTALL_NAME_TOOL"
+fi
 
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS_DIR"
@@ -105,14 +117,6 @@ patch_thin_binary() {
     codesign --remove-signature "$binary" 2>/dev/null || true
     chmod 755 "$binary"
 
-    # REPAIR STEP: Fix malformed __LINKEDIT segment
-    # This is required for binaries that cause "link edit information does not fill the __LINKEDIT segment" errors
-    if ! install_name_tool -id "@rpath/$binary_name" "$binary" 2>/dev/null; then
-        echo "      🔧 Repairing binary layout..."
-        # Using strip -S often fixes the segment alignment issues
-        strip -S "$binary" 2>/dev/null || true
-    fi
-
     local deps=$(get_deps "$binary")
     for dep in $deps; do
         if is_homebrew_path "$dep"; then
@@ -121,15 +125,16 @@ patch_thin_binary() {
 
             if [ -f "$FRAMEWORKS_DIR/$dep_name" ]; then
                 echo "      Patching: $dep -> @rpath/$dep_name"
-                # Use the exact dependency string from otool
-                if ! install_name_tool -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null; then
-                    echo "      🔧 Patch failed, attempting deep repair..."
-                    # Force a re-layout of the binary using codesign
+
+                # Attempt patching with the chosen tool
+                if ! "$PATCH_TOOL" -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null; then
+                    echo "      🔧 Tool failed, attempting repair and retry..."
+                    strip -S "$binary" 2>/dev/null || true
                     codesign --force --sign - "$binary" 2>/dev/null || true
                     codesign --remove-signature "$binary" 2>/dev/null || true
 
-                    if ! install_name_tool -change "$dep" "@rpath/$dep_name" "$binary"; then
-                        echo "      ❌ FAILED to patch $binary_name even after repair"
+                    if ! "$PATCH_TOOL" -change "$dep" "@rpath/$dep_name" "$binary"; then
+                        echo "      ❌ FAILED to patch $binary_name"
                         exit 1
                     fi
                 fi
@@ -137,8 +142,7 @@ patch_thin_binary() {
                 # VERIFY IMMEDIATELY
                 if otool -L "$binary" | grep -q "$dep"; then
                     echo "      ❌ VERIFICATION FAILED: $dep still exists in $binary_name"
-                    # Try a more aggressive approach: remove and add RPATH
-                    install_name_tool -delete_rpath "$BREW_PREFIX/lib" "$binary" 2>/dev/null || true
+                    exit 1
                 fi
             fi
         fi
@@ -146,7 +150,7 @@ patch_thin_binary() {
 
     # Update dylib ID
     if [[ "$binary_name" == *.dylib ]] || [[ "$binary" == *".framework/"* ]]; then
-        install_name_tool -id "@rpath/$binary_name" "$binary" 2>/dev/null || true
+        "$PATCH_TOOL" -id "@rpath/$binary_name" "$binary" 2>/dev/null || true
     fi
 
     # Add standard RPATHs
@@ -258,3 +262,4 @@ fi
 
 echo "✅ SUCCESS: All $TOTAL binaries verified and patched!"
 exit 0
+</file_content>
