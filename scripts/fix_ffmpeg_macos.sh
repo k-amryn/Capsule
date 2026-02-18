@@ -7,7 +7,7 @@
 
 set -uo pipefail
 
-echo "☢️  FFmpeg macOS Post-Build Fix (NUCLEAR RECONSTRUCTION)"
+echo "FFmpeg macOS Post-Build Fix"
 echo "====================================================="
 
 # Find the .app bundle
