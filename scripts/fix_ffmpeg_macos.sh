@@ -1,6 +1,3 @@
-
-
-<file_content>
 #!/bin/bash
 # fix_ffmpeg_macos.sh - Nuclear Reconstruction Option with LLVM support
 #
@@ -9,7 +6,7 @@
 
 set -uo pipefail
 
-echo "FFmpeg macOS Post-Build Fix"
+echo "☢️  FFmpeg macOS Post-Build Fix (NUCLEAR RECONSTRUCTION)"
 echo "====================================================="
 
 # Find the .app bundle
@@ -125,7 +122,6 @@ patch_thin_binary() {
 
             if [ -f "$FRAMEWORKS_DIR/$dep_name" ]; then
                 echo "      Patching: $dep -> @rpath/$dep_name"
-
                 # Attempt patching with the chosen tool
                 if ! "$PATCH_TOOL" -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null; then
                     echo "      🔧 Tool failed, attempting repair and retry..."
@@ -262,4 +258,3 @@ fi
 
 echo "✅ SUCCESS: All $TOTAL binaries verified and patched!"
 exit 0
-</file_content>
