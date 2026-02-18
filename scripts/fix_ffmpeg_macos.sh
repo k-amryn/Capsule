@@ -2,13 +2,12 @@
 # fix_ffmpeg_macos.sh - Aggressive post-build script to fix FFmpeg library paths
 #
 # This script ensures ALL Homebrew dependencies are bundled and patched to use @rpath.
-# It is designed to be extremely thorough and verbose to catch edge cases in
-# nested frameworks and complex dependency trees.
+# It is designed to be extremely thorough and verbose to catch edge cases.
 
 set +e
 
-echo "🔧 FFmpeg macOS Post-Build Fix (Aggressive Mode)"
-echo "==============================================="
+echo "🔧 FFmpeg macOS Post-Build Fix (Force Mode)"
+echo "=========================================="
 
 # Find the .app bundle
 APP_PATH="$1"
@@ -37,10 +36,6 @@ echo "   Homebrew prefix: $HOMEBREW_PREFIX"
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS_DIR"
 
-# Temp file for tracking dependencies
-HOMEBREW_DEPS_FILE=$(mktemp)
-trap "rm -f $HOMEBREW_DEPS_FILE" EXIT
-
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -57,19 +52,7 @@ get_deps() {
 
 is_homebrew_path() {
     local path="$1"
-    [[ "$path" == "/opt/homebrew/"* ]] || [[ "$path" == "/usr/local/"* ]]
-}
-
-is_system_path() {
-    local path="$1"
-    case "$path" in
-        /System/Library/*) return 0 ;;
-        /usr/lib/libSystem*) return 0 ;;
-        /usr/lib/libobjc*) return 0 ;;
-        /usr/lib/libc++*) return 0 ;;
-        @rpath/* | @executable_path/* | @loader_path/*) return 0 ;;
-    esac
-    return 1
+    [[ "$path" == "/opt/homebrew/"* ]] || [[ "$path" == "/usr/local/"* ]] || [[ "$path" == *"Cellar"* ]]
 }
 
 find_in_homebrew() {
@@ -92,6 +75,7 @@ find_in_homebrew() {
         "$HOMEBREW_PREFIX/opt/xz/lib"
         "$HOMEBREW_PREFIX/opt/openssl@3/lib"
         "$HOMEBREW_PREFIX/lib"
+        "/usr/local/lib"
     )
 
     for dir in "${search_dirs[@]}"; do
@@ -111,96 +95,86 @@ find_in_homebrew() {
     return 1
 }
 
-# ============================================================================
-# PASS 1: Recursive Dependency Collection
-# ============================================================================
-echo ""
-echo "📦 Pass 1: Recursively collecting Homebrew dependencies..."
+# Forward declaration
+patch_binary() { :; }
 
-collect_deps_recursive() {
-    local binary="$1"
-    local deps=$(get_deps "$binary")
+bundle_lib() {
+    local lib_name="$1"
+    local dest_path="$FRAMEWORKS_DIR/$lib_name"
 
-    for dep in $deps; do
-        if is_homebrew_path "$dep" && ! is_system_path "$dep"; then
-            local lib_name=$(basename "$dep")
+    if [ -f "$dest_path" ]; then
+        return 0
+    fi
 
-            if ! grep -q "^$lib_name:" "$HOMEBREW_DEPS_FILE" 2>/dev/null; then
-                echo "$lib_name:$dep" >> "$HOMEBREW_DEPS_FILE"
-                echo "   Found: $lib_name (from $(basename "$binary"))"
+    local source_path=$(find_in_homebrew "$lib_name")
+    if [ -n "$source_path" ]; then
+        echo "   Bundling: $lib_name from $source_path"
+        cp -L "$source_path" "$dest_path"
+        chmod 755 "$dest_path"
+        xattr -cr "$dest_path" 2>/dev/null
+        codesign --remove-signature "$dest_path" 2>/dev/null
 
-                local source_path=$(find_in_homebrew "$lib_name")
-                if [ -n "$source_path" ]; then
-                    collect_deps_recursive "$source_path"
-                fi
-            fi
-        fi
-    done
+        # Recursively patch the newly bundled library
+        patch_binary "$dest_path"
+    else
+        echo "   ⚠️  Could not find source for $lib_name"
+        return 1
+    fi
 }
-
-# Scan everything currently in the bundle
-find "$APP_PATH/Contents" -type f | while read -r file; do
-    if is_macho "$file"; then
-        collect_deps_recursive "$file"
-    fi
-done
-
-# ============================================================================
-# PASS 2: Bundling
-# ============================================================================
-echo ""
-echo "📦 Pass 2: Bundling dependencies into Contents/Frameworks..."
-
-while IFS=: read -r lib_name original_path; do
-    dest_path="$FRAMEWORKS_DIR/$lib_name"
-    if [ ! -f "$dest_path" ]; then
-        source_path=$(find_in_homebrew "$lib_name")
-        if [ -n "$source_path" ]; then
-            echo "   Bundling: $lib_name"
-            cp -L "$source_path" "$dest_path"
-            chmod 755 "$dest_path"
-            xattr -cr "$dest_path" 2>/dev/null
-            codesign --remove-signature "$dest_path" 2>/dev/null
-        else
-            echo "   ⚠️  Could not find source for $lib_name"
-        fi
-    fi
-done < "$HOMEBREW_DEPS_FILE"
-
-# ============================================================================
-# PASS 3: Aggressive Patching
-# ============================================================================
-echo ""
-echo "🔧 Pass 3: Patching all binaries in the bundle..."
 
 patch_binary() {
     local binary="$1"
     local binary_name=$(basename "$binary")
 
+    # Ensure writable
     chmod 755 "$binary" 2>/dev/null
     codesign --remove-signature "$binary" 2>/dev/null
 
     local deps=$(get_deps "$binary")
-    local patched=0
 
     for dep in $deps; do
         if is_homebrew_path "$dep"; then
             local dep_name=$(basename "$dep")
-            if [ -f "$FRAMEWORKS_DIR/$dep_name" ]; then
-                echo "      $binary_name: $dep -> @rpath/$dep_name"
-                install_name_tool -change "$dep" "@rpath/$dep_name" "$binary" 2>/dev/null
-                patched=1
+
+            # Ensure it's bundled
+            bundle_lib "$dep_name"
+
+            # Always try to patch if it looks like a Homebrew path
+            echo "      $binary_name: $dep -> @rpath/$dep_name"
+            if ! install_name_tool -change "$dep" "@rpath/$dep_name" "$binary"; then
+                echo "      ❌ Failed to patch $dep in $binary_name"
             fi
         fi
     done
 
     # Update ID if it's a dylib
     if [[ "$binary_name" == *.dylib ]]; then
-        install_name_tool -id "@rpath/$binary_name" "$binary" 2>/dev/null
+        local current_id=$(otool -D "$binary" | tail -n 1)
+        if [[ "$current_id" != "@rpath/$binary_name" ]]; then
+            install_name_tool -id "@rpath/$binary_name" "$binary" 2>/dev/null
+        fi
     fi
+
+    # Add RPATHs to help find bundled dylibs
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$binary" 2>/dev/null
+    install_name_tool -add_rpath "@loader_path/Frameworks" "$binary" 2>/dev/null
+    install_name_tool -add_rpath "@loader_path/../../.." "$binary" 2>/dev/null
 }
 
-# Patch every single Mach-O file in the entire bundle
+# ============================================================================
+# Main Logic
+# ============================================================================
+
+echo ""
+echo "🚀 Starting recursive patch process..."
+
+# Explicitly bundle zlib first as it's a known issue
+echo "   Ensuring zlib is bundled..."
+bundle_lib "libz.1.dylib"
+
+# Scan everything in the bundle
+# We use a temp file to avoid subshell issues with recursion/variables if we were using them
+# But here we just call functions.
 find "$APP_PATH/Contents" -type f | while read -r file; do
     if is_macho "$file"; then
         patch_binary "$file"
@@ -208,10 +182,10 @@ find "$APP_PATH/Contents" -type f | while read -r file; do
 done
 
 # ============================================================================
-# PASS 4: Verification
+# Verification
 # ============================================================================
 echo ""
-echo "🔍 Pass 4: Final Verification..."
+echo "🔍 Final Verification..."
 
 FAILED=0
 CHECKED=0
@@ -219,7 +193,7 @@ CHECKED=0
 find "$APP_PATH/Contents" -type f | while read -r file; do
     if is_macho "$file"; then
         CHECKED=$((CHECKED + 1))
-        bad_deps=$(get_deps "$file" | grep -E "/opt/homebrew|/usr/local" || true)
+        bad_deps=$(get_deps "$file" | grep -E "/opt/homebrew|/usr/local|Cellar" || true)
 
         if [ -n "$bad_deps" ]; then
             echo "   ❌ $(basename "$file") still has Homebrew dependencies:"
@@ -227,14 +201,10 @@ find "$APP_PATH/Contents" -type f | while read -r file; do
                 echo "      - $dep"
             done
             FAILED=$((FAILED + 1))
-        else
-            # Also check if it can find its @rpath dependencies (basic check)
-            echo "   ✅ $(basename "$file")"
         fi
     fi
 done
 
-echo ""
 if [ "$FAILED" -gt 0 ]; then
     echo "❌ FAILED: $FAILED binaries have unresolved dependencies!"
     exit 1
