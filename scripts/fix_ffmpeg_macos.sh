@@ -1,88 +1,130 @@
 #!/bin/bash
-# fix_ffmpeg_macos.sh - Robust dependency bundling using dylibbundler
-#
-# This script uses dylibbundler to recursively find and bundle Homebrew dependencies.
-# It performs multiple passes to ensure that dependencies of dependencies (e.g., libsrt -> openssl)
-# are correctly captured and patched.
+# fix_ffmpeg_macos.sh - Brute-force recursive dependency bundler
+# This script ensures every Homebrew dependency is bundled and patched.
 
-set -euo pipefail
+set -e
 
-echo "🔧 FFmpeg macOS Post-Build Fix (dylibbundler recursive mode)"
-echo "=========================================================="
-
+# Find the .app bundle
 APP_PATH="${1:-}"
 if [ -z "$APP_PATH" ]; then
     APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d | head -n 1)
 fi
 
 if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-    echo "❌ Error: Could not find .app bundle"
+    echo "❌ Error: App bundle not found."
     exit 1
 fi
 
-echo "App bundle: $APP_PATH"
+echo "☢️  NUCLEAR BUNDLER ACTIVATED"
+echo "Target: $APP_PATH"
+
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS_DIR"
 
-# Ensure everything is writable
-chmod -R +w "$APP_PATH"
+# Detect the best patching tool available
+PATCH_TOOL="install_name_tool"
+if command -v llvm-install_name_tool >/dev/null 2>&1; then
+    PATCH_TOOL="llvm-install_name_tool"
+elif [ -f "/opt/homebrew/opt/llvm/bin/llvm-install_name_tool" ]; then
+    PATCH_TOOL="/opt/homebrew/opt/llvm/bin/llvm-install_name_tool"
+elif [ -f "/usr/local/opt/llvm/bin/llvm-install_name_tool" ]; then
+    PATCH_TOOL="/usr/local/opt/llvm/bin/llvm-install_name_tool"
+fi
+echo "Using patch tool: $PATCH_TOOL"
 
-# Detect Homebrew prefix
-BREW_PREFIX=$(brew --prefix)
+# Track processed files to avoid infinite recursion
+PROCESSED_FILES=$(mktemp)
+trap 'rm -f "$PROCESSED_FILES"' EXIT
 
-# Function to run dylibbundler on a specific file
-# We include common Homebrew paths in the search path (-s) to ensure deep dependencies are found
-fix_file() {
-    local file="$1"
-    echo "   Processing: $(basename "$file")"
+# Recursive function to bundle and patch
+bundle_and_patch() {
+    local target="$1"
+    local abs_target=$(realpath "$target")
 
-    # -of: overwrite files in destination
-    # -b: bundle dependencies
-    # -x: fix the file's load commands
-    # -d: destination directory for bundled libraries
-    # -p: prefix for the internal path (standard for macOS apps)
-    # -s: additional search paths for Homebrew formulas that are often keg-only
-    dylibbundler -of -b -x "$file" \
-        -d "$FRAMEWORKS_DIR" \
-        -p "@executable_path/../Frameworks" \
-        -s "$BREW_PREFIX/lib" \
-        -s "$BREW_PREFIX/opt/openssl@3/lib" \
-        -s "$BREW_PREFIX/opt/zlib/lib" \
-        -s "$BREW_PREFIX/opt/icu4c/lib" \
-        -s "$BREW_PREFIX/opt/libiconv/lib" \
-        2>/dev/null || true
+    # Guard against double-processing
+    if grep -q "$abs_target" "$PROCESSED_FILES"; then
+        return
+    fi
+    echo "$abs_target" >> "$PROCESSED_FILES"
+
+    echo "   🔍 Scanning: $(basename "$target")"
+
+    # Ensure file is writable and unsigned
+    chmod +w "$target"
+    codesign --remove-signature "$target" 2>/dev/null || true
+
+    # Get all Homebrew/local dependencies
+    # We parse otool output carefully to get only the paths
+    local deps=$(otool -L "$target" | tail -n +2 | awk '{print $1}' | grep -E "^(/opt/homebrew|/usr/local)" || true)
+
+    for dep in $deps; do
+        [ -z "$dep" ] && continue
+
+        local lib_name=$(basename "$dep")
+        local dest_path="$FRAMEWORKS_DIR/$lib_name"
+
+        # 1. Bundle the dependency if it's missing from the bundle
+        if [ ! -f "$dest_path" ]; then
+            echo "      📦 Bundling: $lib_name"
+            if [ -f "$dep" ]; then
+                cp -L "$dep" "$dest_path"
+            else
+                # Fallback: find the lib in Homebrew opt folders if the path is broken
+                local brew_prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
+                local found_lib=$(find "$brew_prefix/opt" -name "$lib_name" -type f | head -n 1)
+                if [ -n "$found_lib" ]; then
+                    cp -L "$found_lib" "$dest_path"
+                else
+                    echo "      ⚠️  WARNING: Could not find source for $lib_name"
+                    continue
+                fi
+            fi
+            chmod 755 "$dest_path"
+            # RECURSE: Process the newly bundled library immediately
+            bundle_and_patch "$dest_path"
+        fi
+
+        # 2. Patch the binary to use the bundled version
+        echo "      🔗 Relinking: $lib_name"
+        # We try the patch tool, and if it fails (common with malformed FFmpeg binaries),
+        # we try to repair the binary with strip before retrying.
+        $PATCH_TOOL -change "$dep" "@executable_path/../Frameworks/$lib_name" "$target" || {
+            echo "      🔧 Standard patch failed, attempting repair..."
+            strip -S "$target" 2>/dev/null || true
+            $PATCH_TOOL -change "$dep" "@executable_path/../Frameworks/$lib_name" "$target"
+        }
+    done
+
+    # 3. Update internal ID for dylibs so they identify as bundled
+    if [[ "$target" == *.dylib ]]; then
+        $PATCH_TOOL -id "@executable_path/../Frameworks/$(basename "$target")" "$target" 2>/dev/null || true
+    fi
+
+    # 4. Add standard RPATHs to ensure resolution works
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$target" 2>/dev/null || true
+    install_name_tool -add_rpath "@loader_path/Frameworks" "$target" 2>/dev/null || true
 }
 
-# Phase 1: Process all binaries in the main app bundle
-echo "🚀 Phase 1: Initial bundling pass for all binaries..."
+# Phase 1: Initial scan of all binaries in the bundle
+echo "🛠️  Phase 1: Processing all binaries..."
+# We find all Mach-O files (executables, dylibs, frameworks)
 find "$APP_PATH/Contents" -type f | while read -r file; do
     if file "$file" 2>/dev/null | grep -q "Mach-O"; then
-        fix_file "$file"
+        bundle_and_patch "$file"
     fi
 done
 
-# Phase 2: Recursive pass specifically for the bundled libraries
-# This ensures that if a bundled library (like libsrt) has its own Homebrew
-# dependencies (like openssl), they are also bundled and patched.
-echo "🚀 Phase 2: Recursive bundling pass for bundled libraries..."
-find "$FRAMEWORKS_DIR" -type f | while read -r file; do
-    if file "$file" 2>/dev/null | grep -q "Mach-O"; then
-        fix_file "$file"
-    fi
-done
-
-# Phase 3: Final Verification
-echo ""
-echo "🔍 Final Verification..."
+# Phase 2: Final Verification
+echo "🧪 Phase 2: Final Verification..."
 FAILED=0
 TOTAL=0
 while read -r bin; do
     if file "$bin" 2>/dev/null | grep -q "Mach-O"; then
         TOTAL=$((TOTAL + 1))
-        # Check for any remaining absolute paths to Homebrew or /usr/local
-        BAD_DEPS=$(otool -L "$bin" 2>/dev/null | grep -E "/opt/homebrew|/usr/local" || true)
+        # Check for any remaining absolute Homebrew paths
+        BAD_DEPS=$(otool -L "$bin" | grep -E "/opt/homebrew|/usr/local" || true)
         if [ -n "$BAD_DEPS" ]; then
-            echo "   ❌ FAILED: $(basename "$bin") still has Homebrew paths"
+            echo "   ❌ FAILED: $(basename "$bin") still has absolute paths:"
             echo "$BAD_DEPS" | sed 's/^/      /'
             FAILED=$((FAILED + 1))
         fi
@@ -94,5 +136,5 @@ if [ "$FAILED" -gt 0 ]; then
     exit 1
 fi
 
-echo "✅ SUCCESS: All $TOTAL binaries verified and patched!"
+echo "✅ SUCCESS: All $TOTAL binaries verified and free of Homebrew paths!"
 exit 0
