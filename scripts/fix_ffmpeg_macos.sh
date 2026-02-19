@@ -1,170 +1,173 @@
 #!/bin/bash
+# fix_ffmpeg_macos.sh
+#
+# Strategy:
+#   1. dylibbundler handles the heavy lifting - it recursively finds, copies, and
+#      relinks Homebrew dependencies. It handles the malformed __LINKEDIT segments
+#      in the FFmpeg frameworks that Apple's install_name_tool cannot.
+#
+#   2. A manual sweep catches anything dylibbundler skipped. This happens when a
+#      dependency is already present in Frameworks (e.g. libssl.3.dylib was bundled
+#      in pass 1, so dylibbundler skips copying it in pass 2 and also skips patching
+#      the binary that depends on it - e.g. libsrt.1.5.dylib).
+#
+#   3. Zero-tolerance verification confirms no absolute Homebrew paths remain.
+
 set -euo pipefail
 
-# fix_ffmpeg_macos.sh - Final Robust Solution
-# Handles __LINKEDIT corruption using LLVM tools and architecture splitting.
-
+# ---------------------------------------------------------------------------
+# Locate the .app bundle
+# ---------------------------------------------------------------------------
 APP_PATH="${1:-}"
 if [ -z "$APP_PATH" ]; then
-    APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d | head -n 1)
+    APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d 2>/dev/null | head -n 1)
 fi
 
-echo "🚀 Starting Robust macOS Dependency Bundling"
-echo "Target: $APP_PATH"
+if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+    echo "❌  Could not find .app bundle"
+    exit 1
+fi
 
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
+BREW_PREFIX=$(brew --prefix)
+
+echo "🔧  fix_ffmpeg_macos.sh"
+echo "    App:        $APP_PATH"
+echo "    Brew:       $BREW_PREFIX"
+echo "    Frameworks: $FRAMEWORKS_DIR"
+echo ""
+
 mkdir -p "$FRAMEWORKS_DIR"
+chmod -R +w "$APP_PATH"
 
-# 1. Find LLVM tools aggressively
-# LLVM tools are required to handle malformed binaries that Apple's tools reject.
-BREW_PREFIX=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
-LLVM_BIN="$BREW_PREFIX/opt/llvm/bin"
-PATCH_TOOL="install_name_tool"
-
-if [ -f "$LLVM_BIN/llvm-install_name_tool" ]; then
-    PATCH_TOOL="$LLVM_BIN/llvm-install_name_tool"
-    echo "✅ Using LLVM patch tool: $PATCH_TOOL"
-elif command -v llvm-install_name_tool >/dev/null 2>&1; then
-    PATCH_TOOL=$(command -v llvm-install_name_tool)
-    echo "✅ Using LLVM patch tool from PATH: $PATCH_TOOL"
-else
-    echo "⚠️  llvm-install_name_tool not found, using system tool (expect failures on FFmpeg libs)"
-fi
-
-# 2. Helper Functions
-get_deps() {
-    otool -L "$1" 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -E "^(/opt/homebrew|/usr/local)" || true
+# ---------------------------------------------------------------------------
+# Helper: run dylibbundler on a single Mach-O file
+# We supply explicit -s paths for keg-only formulae that aren't in
+# $BREW_PREFIX/lib by default, so dylibbundler can locate their sources.
+# ---------------------------------------------------------------------------
+run_dylibbundler() {
+    local file="$1"
+    dylibbundler \
+        -of \
+        -b \
+        -x  "$file" \
+        -d  "$FRAMEWORKS_DIR" \
+        -p  "@executable_path/../Frameworks" \
+        -s  "$BREW_PREFIX/lib" \
+        -s  "$BREW_PREFIX/opt/openssl@3/lib" \
+        -s  "$BREW_PREFIX/opt/zlib/lib" \
+        -s  "$BREW_PREFIX/opt/libiconv/lib" \
+        -s  "$BREW_PREFIX/opt/gettext/lib" \
+        -s  "$FRAMEWORKS_DIR" \
+        2>/dev/null || true
 }
 
+# Helper: is this file a Mach-O binary?
 is_macho() {
     [ -f "$1" ] && file -b "$1" | grep -q "Mach-O"
 }
 
-# 3. Patching Function (Thin Binary)
-patch_binary() {
-    local bin="$1"
-    local name=$(basename "$bin")
+# ---------------------------------------------------------------------------
+# PASS 1 – dylibbundler over every Mach-O in the bundle
+# This handles the FFmpeg frameworks whose __LINKEDIT segments are malformed
+# and cannot be patched by Apple's install_name_tool.
+# ---------------------------------------------------------------------------
+echo "📦  Pass 1: dylibbundler on all bundle binaries..."
+while IFS= read -r -d '' f; do
+    if is_macho "$f"; then
+        echo "    $(basename "$f")"
+        run_dylibbundler "$f"
+    fi
+done < <(find "$APP_PATH/Contents" -type f -print0)
 
-    chmod +w "$bin"
-    codesign --remove-signature "$bin" 2>/dev/null || true
+# ---------------------------------------------------------------------------
+# PASS 2 – dylibbundler over every Mach-O in Frameworks
+# Newly-bundled libraries may have their own Homebrew deps; this catches them.
+# ---------------------------------------------------------------------------
+echo ""
+echo "📦  Pass 2: dylibbundler on bundled dylibs..."
+while IFS= read -r -d '' f; do
+    if is_macho "$f"; then
+        echo "    $(basename "$f")"
+        run_dylibbundler "$f"
+    fi
+done < <(find "$FRAMEWORKS_DIR" -type f -print0)
 
-    # Add header padding to allow modifications (GitHub AI suggestion)
-    install_name_tool -headerpad_max_install_names "$bin" 2>/dev/null || true
+# ---------------------------------------------------------------------------
+# PASS 3 – Manual sweep with install_name_tool
+# dylibbundler skips patching a binary when its dependency is already present
+# in $FRAMEWORKS_DIR (it copies nothing, so it patches nothing).  We catch
+# those stragglers here.  Thin binaries (e.g. libsrt) are handled fine by
+# the standard install_name_tool.
+# ---------------------------------------------------------------------------
+echo ""
+echo "🔧  Pass 3: manual sweep for any remaining absolute paths..."
+while IFS= read -r -d '' file; do
+    if ! is_macho "$file"; then
+        continue
+    fi
 
-    local deps=$(get_deps "$bin")
-    for dep in $deps; do
-        local lib_name=$(basename "$dep")
-        local dest="$FRAMEWORKS_DIR/$lib_name"
+    # Collect all remaining Homebrew-absolute load paths in this binary
+    remaining=$(otool -L "$file" 2>/dev/null \
+        | tail -n +2 \
+        | awk '{print $1}' \
+        | grep -E "^/opt/homebrew|^/usr/local" || true)
 
-        # Bundle if missing
+    for dep in $remaining; do
+        lib_name=$(basename "$dep")
+        dest="$FRAMEWORKS_DIR/$lib_name"
+
+        # If the library isn't bundled yet, try to find and copy it
         if [ ! -f "$dest" ]; then
-            echo "      📦 Bundling: $lib_name"
-            if [ -f "$dep" ]; then
-                cp -L "$dep" "$dest"
+            src=$(find "$BREW_PREFIX/opt" -name "$lib_name" -type f 2>/dev/null | head -n 1)
+            if [ -n "$src" ]; then
+                echo "    bundling late dep: $lib_name"
+                cp -L "$src" "$dest"
+                chmod 755 "$dest"
             else
-                local src=$(find "$BREW_PREFIX/opt" -name "$lib_name" -type f | head -n 1)
-                if [ -n "$src" ]; then
-                    cp -L "$src" "$dest"
-                else
-                    echo "      ⚠️  Could not find source for $lib_name"
-                    continue
-                fi
-            fi
-            chmod 755 "$dest"
-            # Recurse into the newly bundled library
-            process_fat_binary "$dest"
-        fi
-
-        # Relink using the robust tool
-        echo "      🔗 Relinking: $lib_name"
-        if ! "$PATCH_TOOL" -change "$dep" "@rpath/$lib_name" "$bin" 2>/dev/null; then
-            echo "      🔧 Patch failed, attempting repair..."
-            # Repair attempts for corrupted __LINKEDIT segments
-            strip -S "$bin" 2>/dev/null || true
-
-            if ! "$PATCH_TOOL" -change "$dep" "@rpath/$lib_name" "$bin"; then
-                echo "      ❌ FAILED to patch $name"
-                exit 1
+                echo "    ⚠️  cannot find source for $lib_name – skipping"
+                continue
             fi
         fi
+
+        echo "    relinking $(basename "$file") → $lib_name"
+        install_name_tool \
+            -change "$dep" \
+            "@executable_path/../Frameworks/$lib_name" \
+            "$file" 2>/dev/null || true
     done
+done < <(find "$APP_PATH/Contents" -type f -print0)
 
-    # Update ID for dylibs
-    if [[ "$name" == *.dylib ]] || [[ "$bin" == *".framework/"* ]]; then
-        "$PATCH_TOOL" -id "@rpath/$name" "$bin" 2>/dev/null || true
-    fi
-
-    # Add standard RPATHs to ensure resolution works
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$bin" 2>/dev/null || true
-    install_name_tool -add_rpath "@loader_path/Frameworks" "$bin" 2>/dev/null || true
-    install_name_tool -add_rpath "@loader_path/../Frameworks" "$bin" 2>/dev/null || true
-    install_name_tool -add_rpath "@loader_path/../../.." "$bin" 2>/dev/null || true
-}
-
-# 4. FAT Binary Handling
-# We process FAT binaries by splitting them, patching slices, and recombining.
-# This is the most reliable way to handle __LINKEDIT corruption.
-process_fat_binary() {
-    local bin="$1"
-    local name=$(basename "$bin")
-
-    if ! lipo -info "$bin" 2>/dev/null | grep -q "Architectures in the fat file\|are:"; then
-        patch_binary "$bin"
-        return
-    fi
-
-    echo "   📦 FAT binary: $name. Splitting..."
-    local archs=$(lipo -archs "$bin")
-    local work_dir=$(mktemp -d)
-    local thin_files=""
-
-    for arch in $archs; do
-        local thin="$work_dir/$arch"
-        if lipo -thin "$arch" -output "$thin" "$bin" 2>/dev/null; then
-            patch_binary "$thin"
-            thin_files="$thin_files $thin"
-        else
-            echo "      ⚠️  Failed to extract $arch slice"
-        fi
-    done
-
-    if [ -n "$thin_files" ]; then
-        lipo -create $thin_files -output "$bin"
-        echo "      ✓ Recombined $name"
-    fi
-    rm -rf "$work_dir"
-}
-
-# 5. Main Execution
-echo "🛠️  Phase 1: Processing all binaries..."
-# Find all binaries and process them
-ALL_BINARIES=$(mktemp)
-find "$APP_PATH/Contents" -type f > "$ALL_BINARIES"
-
-while read -r file; do
-    if is_macho "$file"; then
-        process_fat_binary "$file"
-    fi
-done < "$ALL_BINARIES"
-
-echo "🧪 Phase 2: Final Verification..."
+# ---------------------------------------------------------------------------
+# VERIFY – zero tolerance for remaining absolute Homebrew paths
+# ---------------------------------------------------------------------------
+echo ""
+echo "🔍  Verification..."
 FAILED=0
-while read -r bin; do
-    if is_macho "$bin"; then
-        BAD_DEPS=$(otool -L "$bin" | grep -E "/opt/homebrew|/usr/local" || true)
-        if [ -n "$BAD_DEPS" ]; then
-            echo "   ❌ FAILED: $(basename "$bin") still has absolute paths:"
-            echo "$BAD_DEPS" | sed 's/^/      /'
-            FAILED=$((FAILED + 1))
-        fi
+TOTAL=0
+
+while IFS= read -r -d '' bin; do
+    if ! is_macho "$bin"; then
+        continue
     fi
-done < "$ALL_BINARIES"
+    TOTAL=$((TOTAL + 1))
 
-rm -f "$ALL_BINARIES"
+    bad=$(otool -L "$bin" 2>/dev/null \
+        | grep -E "/opt/homebrew|/usr/local" || true)
 
+    if [ -n "$bad" ]; then
+        echo "    ❌  $(basename "$bin") still has absolute paths:"
+        echo "$bad" | sed 's/^/        /'
+        FAILED=$((FAILED + 1))
+    fi
+done < <(find "$APP_PATH/Contents" -type f -print0)
+
+echo ""
+echo "======================================="
 if [ "$FAILED" -gt 0 ]; then
-    echo "❌ Error: Verification failed for $FAILED binaries."
+    echo "❌  FAILED: $FAILED of $TOTAL binaries have unresolved dependencies"
     exit 1
 fi
 
-echo "✅ SUCCESS: App bundle is now self-contained and patched!"
+echo "✅  SUCCESS: all $TOTAL binaries are clean"
+exit 0

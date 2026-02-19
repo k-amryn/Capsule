@@ -24,10 +24,6 @@ jobs:
 
       - name: Install Homebrew dependencies for bundling
         run: |
-          # Initialize Homebrew environment
-          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
-
-          # Install all required dependencies including dylibbundler
           brew install libpng fontconfig freetype fribidi harfbuzz graphite2 glib pcre2 srt openssl@3 gettext expat brotli zlib bzip2 libiconv xz dylibbundler
 
       - name: Install fastforge
@@ -44,13 +40,8 @@ jobs:
 
       - name: Fix FFmpeg dependencies in app bundle
         run: |
-          # Ensure Homebrew is in the environment
-          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
-
           APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d | head -n 1)
           echo "Found app: $APP_PATH"
-
-          # Run the robust patching script
           chmod +x scripts/fix_ffmpeg_macos.sh
           ./scripts/fix_ffmpeg_macos.sh "$APP_PATH"
 
