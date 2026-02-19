@@ -25,6 +25,8 @@ jobs:
       - name: Install Homebrew dependencies for bundling
         run: |
           brew install libpng fontconfig freetype fribidi harfbuzz graphite2 glib pcre2 srt openssl@3 gettext expat brotli zlib bzip2 libiconv xz llvm
+          # Add LLVM to PATH so llvm-install_name_tool is available
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
       - name: Install fastforge
         run: dart pub global activate fastforge

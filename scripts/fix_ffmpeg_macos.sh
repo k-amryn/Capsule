@@ -31,13 +31,21 @@ fi
 echo "Homebrew prefix: $BREW_PREFIX"
 
 # Find LLVM tools (installed via brew install llvm)
-LLVM_INSTALL_NAME_TOOL=$(find "$BREW_PREFIX/opt/llvm/bin" -name "llvm-install_name_tool" | head -n 1)
-if [ -z "$LLVM_INSTALL_NAME_TOOL" ]; then
-    echo "⚠️  llvm-install_name_tool not found, falling back to system tool"
-    PATCH_TOOL="install_name_tool"
-else
+# LLVM is keg-only, so it's not in the path by default.
+LLVM_PREFIX=$(brew --prefix llvm 2>/dev/null || echo "$BREW_PREFIX/opt/llvm")
+LLVM_INSTALL_NAME_TOOL="$LLVM_PREFIX/bin/llvm-install_name_tool"
+
+if [ -f "$LLVM_INSTALL_NAME_TOOL" ]; then
     echo "✅ Using $LLVM_INSTALL_NAME_TOOL"
     PATCH_TOOL="$LLVM_INSTALL_NAME_TOOL"
+    # Add to path so other tools (like strip) might be found if we need them
+    export PATH="$LLVM_PREFIX/bin:$PATH"
+elif command -v llvm-install_name_tool >/dev/null 2>&1; then
+    PATCH_TOOL=$(command -v llvm-install_name_tool)
+    echo "✅ Using $PATCH_TOOL (from PATH)"
+else
+    echo "⚠️  llvm-install_name_tool not found at $LLVM_INSTALL_NAME_TOOL, falling back to system tool"
+    PATCH_TOOL="install_name_tool"
 fi
 
 FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
