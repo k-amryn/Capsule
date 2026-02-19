@@ -24,8 +24,13 @@ jobs:
 
       - name: Install Homebrew dependencies for bundling
         run: |
+          # Initialize Homebrew environment
+          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+
+          # Install all required dependencies including LLVM for robust patching
           brew install libpng fontconfig freetype fribidi harfbuzz graphite2 glib pcre2 srt openssl@3 gettext expat brotli zlib bzip2 libiconv xz llvm
-          # Add LLVM to PATH so llvm-install_name_tool is available
+
+          # Ensure LLVM tools are available in the path for subsequent steps
           echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
       - name: Install fastforge
@@ -42,10 +47,15 @@ jobs:
 
       - name: Fix FFmpeg dependencies in app bundle
         run: |
+          # Ensure Homebrew and LLVM are in the environment
+          eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+
           APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d | head -n 1)
           echo "Found app: $APP_PATH"
+
+          # Run the robust patching script
           chmod +x scripts/fix_ffmpeg_macos.sh
-          bash scripts/fix_ffmpeg_macos.sh "$APP_PATH"
+          ./scripts/fix_ffmpeg_macos.sh "$APP_PATH"
 
       - name: Re-sign app bundle
         run: |
