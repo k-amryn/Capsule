@@ -31,7 +31,9 @@ jobs:
           brew install libpng fontconfig freetype fribidi harfbuzz graphite2 glib pcre2 srt openssl@3 gettext expat brotli zlib bzip2 libiconv xz llvm
 
           # Ensure LLVM tools are available in the path for subsequent steps
-          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+          LLVM_PATH=$(brew --prefix llvm)
+          echo "$LLVM_PATH/bin" >> $GITHUB_PATH
+          echo "LLVM_PATH=$LLVM_PATH" >> $GITHUB_ENV
 
       - name: Install fastforge
         run: dart pub global activate fastforge
@@ -47,7 +49,7 @@ jobs:
 
       - name: Fix FFmpeg dependencies in app bundle
         run: |
-          # Ensure Homebrew and LLVM are in the environment
+          # Ensure Homebrew is in the environment
           eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
 
           APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d | head -n 1)
@@ -55,7 +57,7 @@ jobs:
 
           # Run the robust patching script
           chmod +x scripts/fix_ffmpeg_macos.sh
-          ./scripts/fix_ffmpeg_macos.sh "$APP_PATH"
+          ./scripts/fix_ffmpeg_macos.sh "$APP_PATH" "$LLVM_PATH"
 
       - name: Re-sign app bundle
         run: |
