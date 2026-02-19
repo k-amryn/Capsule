@@ -27,13 +27,8 @@ jobs:
           # Initialize Homebrew environment
           eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
 
-          # Install all required dependencies including LLVM for robust patching
-          brew install libpng fontconfig freetype fribidi harfbuzz graphite2 glib pcre2 srt openssl@3 gettext expat brotli zlib bzip2 libiconv xz llvm
-
-          # Ensure LLVM tools are available in the path for subsequent steps
-          LLVM_BIN="$(brew --prefix llvm)/bin"
-          echo "$LLVM_BIN" >> $GITHUB_PATH
-          echo "PATCH_TOOL=$LLVM_BIN/llvm-install_name_tool" >> $GITHUB_ENV
+          # Install all required dependencies including dylibbundler
+          brew install libpng fontconfig freetype fribidi harfbuzz graphite2 glib pcre2 srt openssl@3 gettext expat brotli zlib bzip2 libiconv xz dylibbundler
 
       - name: Install fastforge
         run: dart pub global activate fastforge
@@ -55,8 +50,15 @@ jobs:
           APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d | head -n 1)
           echo "Found app: $APP_PATH"
 
-          # Run the robust patching script
-          chmod +x scripts/fix_ffmpeg_macos.sh
+          # Use dylibbundler to bundle all dependencies
+          # We scan every Mach-O file in the bundle to ensure nothing is missed
+          mkdir -p "$APP_PATH/Contents/Frameworks"
+          find "$APP_PATH/Contents" -type f | while read -r file; do
+            if file "$file" | grep -q "Mach-O"; then
+              echo "Bundling deps for $file"
+              dylibbundler -bundle-deps -x "$file" -d "$APP_PATH/Contents/Frameworks" -p @executable_path/../Frameworks -of || true
+            fi
+          done
           ./scripts/fix_ffmpeg_macos.sh "$APP_PATH"
 
       - name: Re-sign app bundle
