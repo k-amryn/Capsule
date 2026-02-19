@@ -50,15 +50,8 @@ jobs:
           APP_PATH=$(find build/macos/Build/Products/Release -name "*.app" -type d | head -n 1)
           echo "Found app: $APP_PATH"
 
-          # Use dylibbundler to bundle all dependencies
-          # We scan every Mach-O file in the bundle to ensure nothing is missed
-          mkdir -p "$APP_PATH/Contents/Frameworks"
-          find "$APP_PATH/Contents" -type f | while read -r file; do
-            if file "$file" | grep -q "Mach-O"; then
-              echo "Bundling deps for $file"
-              dylibbundler -bundle-deps -x "$file" -d "$APP_PATH/Contents/Frameworks" -p @executable_path/../Frameworks -of || true
-            fi
-          done
+          # Run the robust patching script
+          chmod +x scripts/fix_ffmpeg_macos.sh
           ./scripts/fix_ffmpeg_macos.sh "$APP_PATH"
 
       - name: Re-sign app bundle
