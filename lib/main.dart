@@ -65,6 +65,19 @@ else
 fi
 ''');
       Process.runSync('chmod', ['+x', pactl.path]);
+
+      final ffprobe = File('${dir.path}/ffprobe');
+      ffprobe.writeAsStringSync('''#!/bin/sh
+unset LD_LIBRARY_PATH
+REAL_FFPROBE=\$(PATH=\$(echo "\$PATH" | sed -e 's|/tmp/capsule_wrappers:||g' -e 's|/tmp/capsule_wrappers||g') command -v ffprobe)
+if [ -n "\$REAL_FFPROBE" ]; then
+  exec "\$REAL_FFPROBE" "\$@"
+else
+  echo "ffprobe not found" >&2
+  exit 1
+fi
+''');
+      Process.runSync('chmod', ['+x', ffprobe.path]);
     } catch (e) {
       debugPrint('Error setting up wrappers: \$e');
     }
