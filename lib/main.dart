@@ -19,8 +19,61 @@ import 'views/camera_view.dart';
 import 'views/compress_view.dart';
 import 'widgets/window_buttons.dart';
 
+void _setupWrappers() {
+  if (Platform.isLinux && Platform.environment.containsKey('APPIMAGE')) {
+    try {
+      final dir = Directory('/tmp/capsule_wrappers');
+      if (!dir.existsSync()) {
+        dir.createSync(recursive: true);
+      }
+      
+      final parecord = File('${dir.path}/parecord');
+      parecord.writeAsStringSync('''#!/bin/sh
+unset LD_LIBRARY_PATH
+REAL_PARECORD=\$(PATH=\$(echo "\$PATH" | sed -e 's|/tmp/capsule_wrappers:||g' -e 's|/tmp/capsule_wrappers||g') command -v parecord)
+if [ -n "\$REAL_PARECORD" ]; then
+  exec "\$REAL_PARECORD" "\$@"
+else
+  echo "parecord not found" >&2
+  exit 1
+fi
+''');
+      Process.runSync('chmod', ['+x', parecord.path]);
+
+      final ffmpeg = File('${dir.path}/ffmpeg');
+      ffmpeg.writeAsStringSync('''#!/bin/sh
+unset LD_LIBRARY_PATH
+REAL_FFMPEG=\$(PATH=\$(echo "\$PATH" | sed -e 's|/tmp/capsule_wrappers:||g' -e 's|/tmp/capsule_wrappers||g') command -v ffmpeg)
+if [ -n "\$REAL_FFMPEG" ]; then
+  exec "\$REAL_FFMPEG" "\$@"
+else
+  echo "ffmpeg not found" >&2
+  exit 1
+fi
+''');
+      Process.runSync('chmod', ['+x', ffmpeg.path]);
+
+      final pactl = File('${dir.path}/pactl');
+      pactl.writeAsStringSync('''#!/bin/sh
+unset LD_LIBRARY_PATH
+REAL_PACTL=\$(PATH=\$(echo "\$PATH" | sed -e 's|/tmp/capsule_wrappers:||g' -e 's|/tmp/capsule_wrappers||g') command -v pactl)
+if [ -n "\$REAL_PACTL" ]; then
+  exec "\$REAL_PACTL" "\$@"
+else
+  echo "pactl not found" >&2
+  exit 1
+fi
+''');
+      Process.runSync('chmod', ['+x', pactl.path]);
+    } catch (e) {
+      debugPrint('Error setting up wrappers: \$e');
+    }
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  _setupWrappers();
   await logger.init();
   logger.log(
     'App started on ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
