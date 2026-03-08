@@ -1,16 +1,10 @@
---- capsule/android/app/src/main/AndroidManifest.xml
-+++ capsule/android/app/src/main/AndroidManifest.xml
-@@ -1,5 +1,14 @@
- <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-+    <uses-permission android:name="android.permission.INTERNET"/>
-+    <uses-permission android:name="android.permission.CAMERA"/>
-+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
-+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
-+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
-+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+--- android/app/proguard-rules.pro
++++ android/app/proguard-rules.pro
+@@ -8,4 +8,7 @@
+ 
+ # FFmpegKit
+ -keep class com.arthenica.ffmpegkit.** { *; }
+ -keep class com.antonkarpenko.ffmpegkit.** { *; }
 +
-     <application
-         android:label="capsule"
-         android:name="${applicationName}"
++# Ignore Play Store warnings
++-dontwarn com.google.android.play.core.**
