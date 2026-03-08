@@ -169,8 +169,37 @@ jobs:
           name: linux-appimage
           path: dist/**/*.AppImage
 
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "master"
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Android APK
+        run: flutter build apk --release
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
   release:
-    needs: [build-macos, build-windows, build-linux]
+    needs: [build-macos, build-windows, build-linux, build-android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -210,7 +239,8 @@ jobs:
           # Rename Linux AppImage
           find artifacts -name "*.AppImage" -type f -exec cp {} "release_files/Capsule.appimage" \;
 
-
+          # Rename Android APK
+          find artifacts -name "*.apk" -type f -exec cp {} "release_files/Capsule.apk" \;
 
           ls -la release_files/
 
