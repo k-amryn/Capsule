@@ -1,22 +1,16 @@
---- lib/main.dart
-+++ lib/main.dart
-@@ -65,6 +65,18 @@
- fi
- ''');
-       Process.runSync('chmod', ['+x', pactl.path]);
+--- capsule/android/app/src/main/AndroidManifest.xml
++++ capsule/android/app/src/main/AndroidManifest.xml
+@@ -1,5 +1,14 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android">
++    <uses-permission android:name="android.permission.INTERNET"/>
++    <uses-permission android:name="android.permission.CAMERA"/>
++    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
++    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
++    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
++    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
++    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
++    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
 +
-+      final ffprobe = File('${dir.path}/ffprobe');
-+      ffprobe.writeAsStringSync('''#!/bin/sh
-+unset LD_LIBRARY_PATH
-+REAL_FFPROBE=\$(PATH=\$(echo "\$PATH" | sed -e 's|/tmp/capsule_wrappers:||g' -e 's|/tmp/capsule_wrappers||g') command -v ffprobe)
-+if [ -n "\$REAL_FFPROBE" ]; then
-+  exec "\$REAL_FFPROBE" "\$@"
-+else
-+  echo "ffprobe not found" >&2
-+  exit 1
-+fi
-+''');
-+      Process.runSync('chmod', ['+x', ffprobe.path]);
-     } catch (e) {
-       debugPrint('Error setting up wrappers: \$e');
-     }
+     <application
+         android:label="capsule"
+         android:name="${applicationName}"
