@@ -15,12 +15,23 @@ After researching and discovering that ffmpeg can handle still images as well as
 Capsule is almost entirely coded with AI, so there will be quirks and bugs. Feel free to submit issues and pull requests!
 
 ## Building
-```git clone https://github.com/kamryn404/Capsule```
-```cd Capsule```
-```flutter pub get```
-```flutter build```
+```bash
+git clone https://github.com/kamryn404/Capsule
+```
 
-### Support development
+```bash
+cd Capsule
+```
+
+```bash
+flutter pub get
+```
+
+```bash
+flutter build
+```
+
+## Support development
 Donations are very welcome and would be really cool.
 
 https://buymeacoffee.com/kamryn404 
