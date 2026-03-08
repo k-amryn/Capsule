@@ -6,10 +6,10 @@ The idea for Capsule sprung from my desire to add more images and videos to my j
 After researching and discovering that ffmpeg can handle still images as well as video and audio, I realized that Capsule could be a sleek general purpose media compressor in addition to the quick-capture tool I envisioned, using ffmpeg as the compression backend.
 
 ## ffmpeg
-- macOS: prefers ffmpeg in PATH, uses ffmpeg_kit_flutter_new_full as fallback
+- macOS: prefers ffmpeg in PATH, uses [ffmpeg_kit_flutter_new_full](https://pub.dev/packages/ffmpeg_kit_flutter_new_full) as fallback
 - Windows: ffmpeg must be in PATH
 - Linux: ffmpeg must be in PATH
-- Android (coming soon): uses ffmpeg_kit_flutter_new_full
+- Android: uses [ffmpeg_kit_flutter_new_full](https://pub.dev/packages/ffmpeg_kit_flutter_new_full)
 
 ## Note
 Capsule is almost entirely coded with AI, so there will be quirks and bugs. Feel free to submit issues and pull requests!
