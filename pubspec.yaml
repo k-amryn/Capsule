@@ -56,6 +56,7 @@ dependencies:
   gal: ^2.3.2
   permission_handler: ^12.0.1
   flutter_svg: ^2.2.3
+  super_clipboard: ^0.9.1
 
 dev_dependencies:
   flutter_test:
@@ -65,6 +66,7 @@ dev_dependencies:
   fastforge: ^0.6.6
 
 dependency_overrides:
+  uuid: ^4.1.0
   camera_linux:
     path: packages/camera_linux_local
   flutter_app_packager:

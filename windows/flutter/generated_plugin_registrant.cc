@@ -10,11 +10,13 @@
 #include <desktop_drop/desktop_drop_plugin.h>
 #include <file_selector_windows/file_selector_windows.h>
 #include <gal/gal_plugin_c_api.h>
+#include <irondash_engine_context/irondash_engine_context_plugin_c_api.h>
 #include <media_kit_libs_windows_video/media_kit_libs_windows_video_plugin_c_api.h>
 #include <media_kit_video/media_kit_video_plugin_c_api.h>
 #include <permission_handler_windows/permission_handler_windows_plugin.h>
 #include <record_windows/record_windows_plugin_c_api.h>
 #include <screen_retriever_windows/screen_retriever_windows_plugin_c_api.h>
+#include <super_native_extensions/super_native_extensions_plugin_c_api.h>
 #include <video_player_win/video_player_win_plugin_c_api.h>
 #include <volume_controller/volume_controller_plugin_c_api.h>
 #include <window_manager/window_manager_plugin.h>
@@ -28,6 +30,8 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("FileSelectorWindows"));
   GalPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("GalPluginCApi"));
+  IrondashEngineContextPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("IrondashEngineContextPluginCApi"));
   MediaKitLibsWindowsVideoPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("MediaKitLibsWindowsVideoPluginCApi"));
   MediaKitVideoPluginCApiRegisterWithRegistrar(
@@ -38,6 +42,8 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("RecordWindowsPluginCApi"));
   ScreenRetrieverWindowsPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("ScreenRetrieverWindowsPluginCApi"));
+  SuperNativeExtensionsPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("SuperNativeExtensionsPluginCApi"));
   VideoPlayerWinPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("VideoPlayerWinPluginCApi"));
   VolumeControllerPluginCApiRegisterWithRegistrar(

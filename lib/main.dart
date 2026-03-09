@@ -5,6 +5,10 @@ import 'package:capsule/services/log_service.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:super_clipboard/super_clipboard.dart';
+
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:media_kit/media_kit.dart';
@@ -368,6 +372,62 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+
+  Future<void> _pasteImage() async {
+    try {
+      final reader = await ClipboardReader.readClipboard();
+      if (reader.canProvide(Formats.png)) {
+        reader.getFile(Formats.png, (file) async {
+          final stream = file.getStream();
+          final tempDir = await getTemporaryDirectory();
+          final tempFile = File('${tempDir.path}/pasted_image_${DateTime.now().millisecondsSinceEpoch}.png');
+          final sink = tempFile.openWrite();
+          await sink.addStream(stream);
+          await sink.close();
+          await _handleFile(XFile(tempFile.path));
+        });
+      } else if (reader.canProvide(Formats.jpeg)) {
+        reader.getFile(Formats.jpeg, (file) async {
+          final stream = file.getStream();
+          final tempDir = await getTemporaryDirectory();
+          final tempFile = File('${tempDir.path}/pasted_image_${DateTime.now().millisecondsSinceEpoch}.jpg');
+          final sink = tempFile.openWrite();
+          await sink.addStream(stream);
+          await sink.close();
+          await _handleFile(XFile(tempFile.path));
+        });
+      } else if (reader.canProvide(Formats.webp)) {
+        reader.getFile(Formats.webp, (file) async {
+          final stream = file.getStream();
+          final tempDir = await getTemporaryDirectory();
+          final tempFile = File('${tempDir.path}/pasted_image_${DateTime.now().millisecondsSinceEpoch}.webp');
+          final sink = tempFile.openWrite();
+          await sink.addStream(stream);
+          await sink.close();
+          await _handleFile(XFile(tempFile.path));
+        });
+      } else if (reader.canProvide(Formats.fileUri)) {
+        final uri = await reader.readValue(Formats.fileUri);
+        if (uri != null) {
+          await _handleFile(XFile(uri.toFilePath()));
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No supported image found in clipboard')),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('Error pasting image: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error pasting image: $e')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     Widget content = Stack(
@@ -653,14 +713,29 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Widget _buildHome() {
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onPanStart: (details) {
-        if (!Platform.isAndroid && !Platform.isIOS) {
-          windowManager.startDragging();
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        if (event is KeyDownEvent) {
+          final isCmdOrCtrl = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.controlLeft) ||
+                              HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.controlRight) ||
+                              HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.metaLeft) ||
+                              HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.metaRight);
+          if (isCmdOrCtrl && event.logicalKey == LogicalKeyboardKey.keyV) {
+            _pasteImage();
+            return KeyEventResult.handled;
+          }
         }
+        return KeyEventResult.ignored;
       },
-      child: Container(
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onPanStart: (details) {
+          if (!Platform.isAndroid && !Platform.isIOS) {
+            windowManager.startDragging();
+          }
+        },
+        child: Container(
         color: Colors.transparent,
         child: Center(
           child: Column(
@@ -746,6 +821,12 @@ class _MyHomePageState extends State<MyHomePage> {
                   ),
                   const SizedBox(height: 16),
                   _buildActionButton(
+                    icon: Icons.paste,
+                    label: 'Paste Image',
+                    onTap: _pasteImage,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildActionButton(
                     icon: Icons.camera_alt,
                     label: 'Open Camera',
                     onTap: () {
@@ -774,7 +855,7 @@ class _MyHomePageState extends State<MyHomePage> {
           ),
         ),
       ),
-    );
+    ));
   }
 
   Widget _buildFfmpegMissingWarning() {

@@ -5,10 +5,12 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   desktop_drop
   file_selector_linux
+  irondash_engine_context
   media_kit_libs_linux
   media_kit_video
   record_linux
   screen_retriever_linux
+  super_native_extensions
   volume_controller
   window_manager
 )
